@@ -1,0 +1,57 @@
+# Smoke-test stack for a freshly built keycloak-crdb image.
+#
+# Deliberately not quarkus/container/docker-compose.yml from the _crdb branch:
+# that file is for a human poking at a browser (it publishes host ports and
+# reverse-proxies a hard-coded public hostname through Caddy), and both of those
+# make it unreliable in CI. The environment below is otherwise the same
+# CockroachDB configuration, so this exercises the same code paths.
+#
+# Usage is via p2/scripts/smoke-test.sh, which sets KC_IMAGE and CRDB_VERSION.
+
+services:
+  cockroach:
+    image: cockroachdb/cockroach:${CRDB_VERSION:?}
+    command: start-single-node --insecure
+    healthcheck:
+      # /health?ready=1 goes green only once the node will accept SQL, which is
+      # later than the process being up. Starting Keycloak before that point
+      # fails the migration rather than waiting for it.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health?ready=1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 10s
+
+  keycloak:
+    image: ${KC_IMAGE:?}
+    depends_on:
+      cockroach:
+        condition: service_healthy
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_DB: cockroach
+      KC_DB_USERNAME: root
+      KC_DB_PASSWORD: ''
+      KC_DB_SCHEMA: public
+      KC_DB_URL_DATABASE: defaultdb
+      KC_DB_URL_HOST: cockroach
+      KC_DB_URL_PORT: 26257
+      KC_DB_URL_PROPERTIES: '?sslmode=disable&useCockroachMetadata=true'
+      # CockroachDB has no XA support and the fork's JTA integration is off in
+      # this configuration; these mirror the documented _crdb settings.
+      KC_TRANSACTION_XA_ENABLED: 'false'
+      KC_TRANSACTION_JTA_ENABLED: 'false'
+      KC_HOSTNAME_STRICT: 'false'
+      KC_HTTP_ENABLED: 'true'
+      KC_HEALTH_ENABLED: 'true'
+      KC_METRICS_ENABLED: 'true'
+      KC_LOG_LEVEL: INFO
+    entrypoint: /opt/keycloak/bin/kc.sh start
+    # No published ports on purpose. The checks run from inside the compose
+    # network via the cockroach container (whose image ships curl -- its own
+    # healthcheck uses it), so there is nothing to collide with a busy dev
+    # machine or a second smoke test on the same runner, and nothing to be
+    # silently remapped when `compose restart` rebinds ephemeral ports. That
+    # remapping cost a debugging session: the script cached the pre-restart port
+    # and then polled a dead one until it timed out.

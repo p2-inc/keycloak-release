@@ -1,0 +1,63 @@
+name: Self-test
+
+# CI for the automation itself. Everything here runs in well under a minute --
+# no Maven, no Docker, no credentials -- so a broken script is caught on push
+# rather than at 3am when the poller next fires.
+
+on:
+  push:
+    branches: [p2-ci]
+  pull_request:
+    branches: [p2-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install linters
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck >/dev/null
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin actionlint
+          shellcheck --version | head -2
+          actionlint --version | head -1
+
+      - name: Run the test suite
+        run: p2/scripts/test-all.sh
+
+      # The scope policy is pure logic over three lists, so it is tested with
+      # stubs above. This confirms the real ones are still reachable and shaped
+      # as expected -- an upstream rename or a Quay API change would otherwise
+      # only show up as the poller quietly finding nothing to do.
+      - name: Check the remotes are reachable
+        run: |
+          set -euo pipefail
+          . p2/scripts/lib.sh
+          n=$(upstream_tags | grep -c . || true)
+          [ "$n" -gt 100 ] || { echo "::error::only $n upstream release tags found"; exit 1; }
+          echo "upstream release tags: $n"
+
+          n=$(crdb_versions | grep -c . || true)
+          [ "$n" -gt 50 ] || { echo "::error::only $n _crdb branches found"; exit 1; }
+          echo "_crdb branches: $n"
+
+          # A tag we know is published; proves the registry query still parses.
+          quay_tags "$CRDB_IMAGE" | grep -qx "26.7.2" \
+            || { echo "::error::26.7.2 not found on $CRDB_IMAGE"; exit 1; }
+          echo "quay.io reachable and parseable"
+
+      - name: Report what the poller would do
+        run: p2/scripts/detect-work.sh

@@ -1,0 +1,108 @@
+name: Poll upstream tags
+
+# A fork gets no events when upstream pushes a tag, so we look.
+#
+# Nothing is remembered between runs: "already done?" is answered by asking the
+# fork for a <version>_crdb branch and quay.io for a <version> image tag. Delete
+# an image and the next poll rebuilds it. The only stored state is
+# p2/baseline-tags.txt, the set of tags that already existed at activation, which
+# stops the first run trying to build years of history.
+
+on:
+  schedule:
+    # Every six hours. Upstream releases a handful of tags a month, so this is
+    # about latency, not throughput -- worst case a new tag waits six hours.
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Only consider this version (blank = everything new)'
+        required: false
+        type: string
+        default: ''
+      ignore_baseline:
+        description: 'Also consider tags that predate activation (backfill)'
+        type: boolean
+        default: false
+      force:
+        description: 'Ignore the already-published checks and rebuild'
+        type: boolean
+        default: false
+      skip_crdb:
+        description: 'Skip CRDB ports'
+        type: boolean
+        default: false
+      skip_vanilla:
+        description: 'Skip vanilla images'
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Report what would be built and stop'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One poll at a time. Two concurrent polls would both see the same missing
+  # branch and both try to port it.
+  group: p2-poll
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  detect:
+    name: Detect work
+    runs-on: ubuntu-latest
+    outputs:
+      crdb_matrix: ${{ steps.detect.outputs.crdb_matrix }}
+      vanilla_matrix: ${{ steps.detect.outputs.vanilla_matrix }}
+      crdb_count: ${{ steps.detect.outputs.crdb_count }}
+      vanilla_count: ${{ steps.detect.outputs.vanilla_count }}
+      has_work: ${{ steps.detect.outputs.has_work }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        env:
+          ONLY_VERSION: ${{ inputs.version }}
+          IGNORE_BASELINE: ${{ inputs.ignore_baseline && '1' || '0' }}
+          FORCE: ${{ inputs.force && '1' || '0' }}
+          SKIP_CRDB: ${{ inputs.skip_crdb && '1' || '0' }}
+          SKIP_VANILLA: ${{ inputs.skip_vanilla && '1' || '0' }}
+        run: p2/scripts/detect-work.sh
+
+  crdb:
+    name: CRDB ${{ matrix.version }}
+    needs: detect
+    if: needs.detect.outputs.crdb_count != '0' && inputs.dry_run != true
+    strategy:
+      # One at a time, ascending, because each port is based on the previous
+      # release's branch. Running 26.7.3 and 26.7.4 together would base both on
+      # 26.7.2; serialised, 26.7.4 re-resolves and picks up 26.7.3_crdb.
+      max-parallel: 1
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.crdb_matrix) }}
+    uses: ./.github/workflows/p2-crdb-release.yml
+    with:
+      version: ${{ matrix.version }}
+      base: ${{ matrix.base }}
+    secrets: inherit
+
+  vanilla:
+    name: Vanilla ${{ matrix.version }}
+    needs: detect
+    if: needs.detect.outputs.vanilla_count != '0' && inputs.dry_run != true
+    strategy:
+      # Independent of each other -- nothing chains -- but capped so a backfill
+      # cannot saturate the runners.
+      max-parallel: 2
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.vanilla_matrix) }}
+    uses: ./.github/workflows/p2-vanilla-release.yml
+    with:
+      version: ${{ matrix.version }}
+    secrets: inherit
