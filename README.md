@@ -214,6 +214,13 @@ Verified against real tags and real images, locally:
   of which 271 from `-crdb` changelogs, admin API live, restart idempotent.
 - **The build.** `-pl quarkus/deployment,quarkus/dist -am` on the ported 26.7.2
   tree produces a 168MB distribution.
+- **The vanilla path**, end to end for 26.7.2: release asset downloaded, image
+  built from the tag's own Dockerfile, boots in dev mode, admin token works, and
+  the server reports `26.7.2` — which is the assertion that catches an image
+  built from the wrong distribution.
+- **The release-asset fallback is the common case, not the rare one.** 26.7.2 has
+  a published tarball; `26.6.6` and `26.4.15` do not, and fall back to a source
+  build. The tags we care about are frequently the unpublished ones.
 - **The scope policy**, 26 cases including dormant streams, new-stream adoption,
   same-stream base preference, backfill and force.
 - **`latest` selection** against live Quay data: a 26.4.x backport does not take
@@ -229,7 +236,8 @@ Not yet exercised, and worth watching on the first live run:
   case: it is the one known tag that produces both a conflict and a changelog gap.
 - **The multi-arch push**, and therefore the QEMU arm64 build.
 - **`p2/docker/wolfi/Dockerfile`**, which is written but unused
-  (`VANILLA_BASE=tag`).
+  (`VANILLA_BASE=tag`). Switching to it should be done on a dispatch with
+  `publish=false` first.
 - **A cold Maven build.** The local run had a warm `~/.m2`; a runner starts cold,
   so budget considerably longer for the first build of a given version.
 
