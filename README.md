@@ -188,6 +188,51 @@ Issues are disabled on this repository, so PRs are the only in-repo notification
 surface. If you want to be pushed at rather than polled, a Slack step is a small
 addition to `p2-crdb-release.yml`.
 
+## What has actually been exercised
+
+Written before any of it had run on a GitHub runner, so it is worth being
+explicit about which parts are proven and which are not.
+
+Verified against real tags and real images, locally:
+
+- **The port.** `26.6.5_crdb → 26.6.6` and `26.7.1_crdb → 26.7.2` both
+  cherry-pick clean and reproduce the hand-built branches exactly, apart from the
+  two intentional differences (openapi dropped, rolling-upgrades regenerated).
+  `26.6.6_crdb → 26.7.0` goes from three conflicts to one, plus the 26.7.0
+  changelog correctly reported as needing a decision.
+- **Base re-resolution**, including fetching a base branch nobody asked for —
+  the two-tags-between-polls case.
+- **The changeSet ledger.** Regeneration reproduces all 504 entries in the same
+  order as the hand-built file, and stripping our 293 additions reproduces
+  upstream's file byte for byte. More usefully, the safety net was tested from
+  both sides: `mvn install -DskipTests` on `model/jpa` passes with our generated
+  file (*"All ChangeSet in the module recorded as expected"*) and **fails** when
+  a single entry is removed, naming the missing changeSet. `-DskipTests` does not
+  skip it — the plugin is gated on `db.verify.skip`.
+- **The CockroachDB smoke test**, end to end against
+  `quay.io/phasetwo/keycloak-crdb:26.6.6`: ready in 59s, 345 changeSets applied
+  of which 271 from `-crdb` changelogs, admin API live, restart idempotent.
+- **The build.** `-pl quarkus/deployment,quarkus/dist -am` on the ported 26.7.2
+  tree produces a 168MB distribution.
+- **The scope policy**, 26 cases including dormant streams, new-stream adoption,
+  same-stream base preference, backfill and force.
+- **`latest` selection** against live Quay data: a 26.4.x backport does not take
+  it, a new 26.7.x does.
+- `actionlint` and `shellcheck` are clean; `p2/scripts/test-all.sh` passes.
+
+Not yet exercised, and worth watching on the first live run:
+
+- **The workflows themselves.** Nothing has run on a GitHub runner — Actions was
+  still disabled when this was written. Expect the usual first-run friction.
+- **The agent step.** `anthropics/claude-code-action@v1` is wired up and the
+  brief is written, but it has not been invoked. `26.7.0` is the natural test
+  case: it is the one known tag that produces both a conflict and a changelog gap.
+- **The multi-arch push**, and therefore the QEMU arm64 build.
+- **`p2/docker/wolfi/Dockerfile`**, which is written but unused
+  (`VANILLA_BASE=tag`).
+- **A cold Maven build.** The local run had a warm `~/.m2`; a runner starts cold,
+  so budget considerably longer for the first build of a given version.
+
 ## Known rough edges
 
 - **Multi-arch builds use QEMU**, matching what the manual process did. The

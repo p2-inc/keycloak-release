@@ -146,11 +146,27 @@ runs:
           ls -la '${{ steps.paths.outputs.out }}' || true
           exit 1
         fi
-        # A truncated download or a failed build can leave a small file behind;
-        # the real distribution is ~170MB.
+        # A failed build can leave a stub behind; the real distribution is ~170MB.
         size=$(wc -c < "$t")
         if [ "$size" -lt 50000000 ]; then
           echo "::error::$t is only $size bytes; expected a ~170MB distribution"
+          exit 1
+        fi
+        # Size alone is not enough. An interrupted download leaves a file that is
+        # almost the right size and still a valid prefix -- it passes the check
+        # above and then fails much later, inside `docker build`, as
+        # "unpigz: corrupted -- incomplete deflate data". Verify the archive
+        # instead of its length. (Learned the hard way.)
+        if ! gzip -t "$t" 2>/dev/null; then
+          echo "::error::$t is not a valid gzip archive -- truncated download or bad build"
+          rm -f "$t"   # never leave a corrupt file for the cache to pick up
+          exit 1
+        fi
+        # The cache is keyed on (version, sha), so a bad tarball would otherwise
+        # be served to every later run for that commit.
+        if ! tar -tzf "$t" >/dev/null 2>&1; then
+          echo "::error::$t is not a readable tar archive"
+          rm -f "$t"
           exit 1
         fi
         echo "tarball=$t" >> "$GITHUB_OUTPUT"
