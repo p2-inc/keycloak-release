@@ -121,68 +121,50 @@ else
     fi
 fi
 
-# --- 4. secrets ----------------------------------------------------------
+# --- 4. credentials ------------------------------------------------------
 # Reported, never set: these are credentials and belong in a human's hands.
 #
-# Organization secrets count and are the established pattern here -- the Quay
-# credentials phasetwo-containers pushes with are org-level, not repo-level. They
-# are also invisible to this check unless the token carries admin:org, so a
-# repo-level miss is reported as "not repo-level", never as "missing". Getting
-# that wrong would send someone off to re-set secrets that are already working.
+# They live in environments, not in repo- or organization-wide secrets. This fork
+# carries every one of upstream's workflows on every *_crdb branch, two of them
+# pull_request_target, so a repo-wide secret is readable by anything that ever
+# runs here -- including a workflow upstream adds later that the disable step
+# above has never seen. An environment secret is readable only by a job that
+# declares that environment, and only on the branch its policy allows.
+#
+# So a repo-wide secret existing is a finding here, not a pass.
 echo
-log "required secrets:"
-HAVE=$(gh secret list --repo "$REPO" --json name --jq '.[].name' 2>/dev/null || true)
-ORG=${REPO%%/*}
-# Keyed on exit status, not on emptiness: `gh api --jq` prints the API error
-# body to *stdout* on a 403, so a permission failure looks like a populated
-# list of one very strange secret name.
-if ORG_HAVE=$(gh api "orgs/$ORG/actions/secrets" --jq '.secrets[].name' 2>/dev/null); then
-    ORG_VISIBLE=1
-else
-    ORG_VISIBLE=0
-    ORG_HAVE=""
-    log "organization secrets are not readable with this token (needs admin:org)."
-    log "Anything below marked '?' may already be set on the $ORG org."
-fi
+log "credentials:"
 missing=0
-# repo | org | unknown | MISSING -- "unknown" only when the org cannot be read.
-secret_state() {
-    local name=$1
-    in_list "$name" "$HAVE"     && { echo repo; return; }
-    in_list "$name" "$ORG_HAVE" && { echo org;  return; }
-    [ "$ORG_VISIBLE" = "0" ] && { echo unknown; return; }
-    echo missing
-}
-report_secret() {
-    local name=$1 why=$2 state=$3
-    case "$state" in
-        repo)    printf '      \033[32mset\033[0m      %-26s %s\n' "$name" "$why" ;;
-        org)     printf '      \033[32mset\033[0m      %-26s %s (org secret)\n' "$name" "$why" ;;
-        unknown) printf '      \033[33m?\033[0m        %-26s %s (not repo-level; check the %s org)\n' \
-                     "$name" "$why" "$ORG" ;;
-        *)       printf '      \033[31mMISSING\033[0m  %-26s %s\n' "$name" "$why"
-                 missing=$((missing+1)) ;;
-    esac
-}
-check_secret() {
-    report_secret "$1" "$2" "$(secret_state "$1")"
-}
-check_secret QUAY_USERNAME    "push images to quay.io"
-check_secret QUAY_ROBOT_TOKEN "push images to quay.io"
-# Either auth method works; the workflow passes both and the unset one is empty.
-# Either auth method works; the workflow passes both and the unset one is empty.
-AI_WHY="or CLAUDE_CODE_OAUTH_TOKEN -- resolve ports that need judgement"
-a=$(secret_state ANTHROPIC_API_KEY); b=$(secret_state CLAUDE_CODE_OAUTH_TOKEN)
-case "$a $b" in
-    *repo*)    report_secret ANTHROPIC_API_KEY "$AI_WHY" repo ;;
-    *org*)     report_secret ANTHROPIC_API_KEY "$AI_WHY" org ;;
-    *unknown*) report_secret ANTHROPIC_API_KEY "$AI_WHY" unknown ;;
-    *)         report_secret ANTHROPIC_API_KEY "$AI_WHY" missing ;;
-esac
-[ "$missing" -gt 0 ] && echo && warn "$missing secret(s) not set anywhere. Set them with:" \
-    && echo "      gh secret set QUAY_USERNAME --repo $REPO" \
-    && echo "      gh secret set QUAY_ROBOT_TOKEN --repo $REPO" \
-    && echo "      gh secret set ANTHROPIC_API_KEY --repo $REPO"
+for e in agent publish; do
+    names=$(gh secret list --repo "$REPO" --env "$e" --json name \
+        --jq '[.[].name]|join(", ")' 2>/dev/null || true)
+    if [ -n "$names" ]; then
+        printf '      \033[32mset\033[0m      env %-10s %s\n' "$e" "$names"
+    else
+        printf '      \033[31mMISSING\033[0m  env %-10s no secrets set -- see README.md\n' "$e"
+        missing=$((missing+1))
+    fi
+done
+
+REPO_WIDE=$(gh api "repos/$REPO/actions/secrets" --jq '.total_count' 2>/dev/null || echo "?")
+if [ "$REPO_WIDE" = "0" ]; then
+    printf '      \033[32mok\033[0m       %-14s no repo-wide secrets\n' ""
+else
+    printf '      \033[31mFINDING\033[0m  %-14s %s repo-wide secret(s): readable by ANY workflow\n' \
+        "" "$REPO_WIDE"
+    warn "Repo-wide secrets defeat the environment scoping. Move them into the"
+    warn "'agent' or 'publish' environment and delete the repo-level copies."
+    missing=$((missing+1))
+fi
+
+# Organization secrets need admin:org to enumerate, so this cannot be asserted
+# from here. It is worth stating because revoking the org grant is the step that
+# actually removed the exposure, and it is easy to re-add by accident.
+log "organization grant: not checkable without admin:org -- confirm"
+log "$(printf '%s' "${REPO}") is NOT in the repository access list for the"
+log "$(printf '%s' "${REPO%%/*}") org's QUAY_*/ANTHROPIC secrets."
+
+[ "$missing" -gt 0 ] && echo && warn "$missing credential problem(s) above."
 
 # --- 5. what to do next --------------------------------------------------
 echo

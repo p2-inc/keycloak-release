@@ -96,13 +96,36 @@ cannot be overridden from the command line, and upstream builds on amd64 too.
 ## Security posture
 
 This is a **public fork that carries all of upstream's workflows on every
-`*_crdb` branch**, including two `pull_request_target` ones. Secrets are
-organization-level and granted to this repo. `setup-repo.sh` disables every
-workflow whose path is not `.github/workflows/p2-*`, but *disabling is per
-path* — a workflow upstream adds later arrives enabled.
+`*_crdb` branch**, including two `pull_request_target` ones — the trigger that
+runs in *this* repo's context, with secrets, from a PR opened by anyone.
+`setup-repo.sh` disables every workflow whose path is not
+`.github/workflows/p2-*`, but *disabling is per path*, so a workflow upstream
+adds later arrives enabled.
 
-So: after any upstream sync, re-run `p2/scripts/setup-repo.sh` and check the
-report. Treat "a new non-`p2-*` workflow is active" as a finding, not noise.
+Because a denylist cannot be relied on to stay current, **credentials live in
+environments, not in repo or organization secrets**:
+
+| environment | holds | readable by |
+|---|---|---|
+| `agent` | `ANTHROPIC_API_KEY` | the `port` job of `p2-crdb-release` |
+| `publish` | `QUAY_USERNAME`, `QUAY_ROBOT_TOKEN` | the jobs that push images |
+
+Both are pinned by deployment branch policy to `p2-ci`. Only a job that declares
+the environment can read its secrets, and only when running on that branch — so
+an upstream workflow satisfies neither condition, and `toJSON(secrets)` returns
+nothing useful to it. There are deliberately **no repo-wide or org-granted
+secrets on this repository**; keep it that way.
+
+Consequences to respect:
+
+- A new job that needs to push an image must declare `environment: publish`, or
+  the registry login will fail with empty credentials.
+- Don't add `secrets: inherit` to a reusable-workflow call. Environment secrets
+  are resolved per job by the job that declares the environment; passing things
+  down a call chain is what we are deliberately not doing.
+- Still re-run `p2/scripts/setup-repo.sh` after any upstream sync and treat "a
+  new non-`p2-*` workflow is active" as a finding. Environments remove the
+  secret-exfiltration risk, not the wasted-CI-minutes one.
 
 ## Layout
 

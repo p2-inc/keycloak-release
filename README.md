@@ -195,10 +195,23 @@ run; the risk in step 2 is permanent, which is why it wins.
 
 Secrets to set (the script reports which are missing but never sets them):
 
-| secret | for |
-|---|---|
-| `QUAY_USERNAME`, `QUAY_ROBOT_TOKEN` | pushing images — same values as `phasetwo-containers` |
-| `ANTHROPIC_API_KEY` *or* `CLAUDE_CODE_OAUTH_TOKEN` | resolving ports that need judgement |
+| environment | secret | for |
+|---|---|---|
+| `publish` | `QUAY_USERNAME`, `QUAY_ROBOT_TOKEN` | pushing images — same values as `phasetwo-containers` |
+| `agent` | `ANTHROPIC_API_KEY` *or* `CLAUDE_CODE_OAUTH_TOKEN` | resolving ports that need judgement |
+
+These are **environment** secrets, both pinned by branch policy to `p2-ci`, and
+there are deliberately no repo-wide or org-granted secrets here. The reason is
+in AGENTS.md: this fork carries all of upstream's workflows on every `*_crdb`
+branch, two of them `pull_request_target`, and repo-wide secrets would be
+readable by any workflow that ever runs — including one upstream adds later,
+which `setup-repo.sh` has not disabled yet.
+
+```bash
+gh secret set QUAY_USERNAME     --repo p2-inc/keycloak --env publish
+gh secret set QUAY_ROBOT_TOKEN  --repo p2-inc/keycloak --env publish
+gh secret set ANTHROPIC_API_KEY --repo p2-inc/keycloak --env agent
+```
 
 Organization secrets count, and are the pattern here — the Quay credentials
 `phasetwo-containers` pushes with are org-level, so this repo needs no copies of
