@@ -19,6 +19,22 @@ on:
         required: false
         type: string
         default: ''
+      # Declared here as well as under workflow_dispatch, and not because the
+      # poller passes them: an expression referencing an input that a
+      # workflow_call invocation has not declared fails static validation, and
+      # the job `if:` conditions below use both. Omitting them made every call
+      # from p2-upstream-poll.yml a startup_failure while direct dispatch -- the
+      # only path with them declared -- worked fine.
+      publish:
+        description: 'Push the branch and image when everything is green'
+        required: false
+        type: boolean
+        default: true
+      dry_run:
+        description: 'Port, build and smoke test only. Publishes nothing.'
+        required: false
+        type: boolean
+        default: false
     secrets:
       QUAY_USERNAME: { required: false }
       QUAY_ROBOT_TOKEN: { required: false }
@@ -270,8 +286,8 @@ jobs:
     needs: [port, verify]
     if: >-
       needs.port.outputs.review_needed == 'false'
-      && inputs.dry_run != true
-      && (github.event_name != 'workflow_dispatch' || inputs.publish)
+      && !inputs.dry_run
+      && inputs.publish
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -335,7 +351,7 @@ jobs:
   review:
     name: Open a review PR
     needs: [port, verify]
-    if: needs.port.outputs.review_needed == 'true' && inputs.dry_run != true
+    if: needs.port.outputs.review_needed == 'true' && !inputs.dry_run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

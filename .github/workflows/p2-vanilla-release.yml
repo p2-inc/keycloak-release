@@ -18,6 +18,14 @@ on:
         description: 'Keycloak version, e.g. 26.7.3'
         required: true
         type: string
+      # See the note in p2-crdb-release.yml: an input referenced by a job `if:`
+      # must be declared for every trigger the workflow can be invoked through,
+      # or the workflow_call path fails static validation before any job starts.
+      publish:
+        description: 'Push to quay when the smoke test passes'
+        required: false
+        type: boolean
+        default: true
     secrets:
       QUAY_USERNAME: { required: false }
       QUAY_ROBOT_TOKEN: { required: false }
@@ -114,21 +122,21 @@ jobs:
 
       - name: Decide the tag list
         id: tags
-        if: github.event_name != 'workflow_dispatch' || inputs.publish
+        if: inputs.publish
         run: p2/scripts/image-tags.sh --image vanilla --version "$VERSION"
 
       - uses: docker/setup-qemu-action@v3
-        if: github.event_name != 'workflow_dispatch' || inputs.publish
+        if: inputs.publish
 
       - uses: docker/login-action@v3
-        if: github.event_name != 'workflow_dispatch' || inputs.publish
+        if: inputs.publish
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_ROBOT_TOKEN }}
 
       - name: Build and push
-        if: github.event_name != 'workflow_dispatch' || inputs.publish
+        if: inputs.publish
         uses: docker/build-push-action@v6
         with:
           context: ctx
@@ -141,7 +149,7 @@ jobs:
           cache-from: type=gha,scope=vanilla-${{ env.VERSION }}
 
       - name: Summary
-        if: github.event_name != 'workflow_dispatch' || inputs.publish
+        if: inputs.publish
         run: |
           {
             echo "### Published vanilla \`$VERSION\`"
