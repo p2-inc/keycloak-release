@@ -55,9 +55,9 @@ else
     skip "pyyaml not installed"
 fi
 
-head_ "workflow inputs declared for every trigger"
+head_ "workflow caller/callee contracts"
 if python3 -c 'import yaml' 2>/dev/null; then
-    if out=$(p2/scripts/check-workflow-inputs.py 2>&1); then
+    if out=$(p2/scripts/check-workflow-contracts.py 2>&1); then
         ok "$(printf '%s' "$out" | tail -1)"
     else
         bad "undeclared inputs"; printf '%s\n' "$out" | sed 's/^/       /'
