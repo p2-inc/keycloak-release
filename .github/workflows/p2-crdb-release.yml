@@ -170,7 +170,10 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: ${{ steps.brief.outputs.prompt }}
-          claude_args: '--max-turns 80 --permission-mode acceptEdits'
+          claude_args: >-
+            --max-turns 150
+            --model claude-opus-5
+            --permission-mode bypassPermissions
 
       - name: Finalize the port
         id: finalize
