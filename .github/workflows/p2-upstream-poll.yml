@@ -96,7 +96,9 @@ jobs:
     with:
       version: ${{ matrix.version }}
       base: ${{ matrix.base }}
-    secrets: inherit
+    # No `secrets: inherit`. The callees read their credentials from
+    # environments they declare per job, which is the whole point: nothing is
+    # handed down a call chain where an unrelated workflow could pick it up.
 
   vanilla:
     name: Vanilla ${{ matrix.version }}
@@ -111,4 +113,3 @@ jobs:
     uses: ./.github/workflows/p2-vanilla-release.yml
     with:
       version: ${{ matrix.version }}
-    secrets: inherit

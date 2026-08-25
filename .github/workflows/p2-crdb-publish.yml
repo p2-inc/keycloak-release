@@ -44,6 +44,8 @@ jobs:
   publish:
     name: Publish ${{ inputs.version }}
     runs-on: ubuntu-latest
+    # Registry credentials come from this environment, which is pinned to p2-ci.
+    environment: publish
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4

@@ -26,9 +26,6 @@ on:
         required: false
         type: boolean
         default: true
-    secrets:
-      QUAY_USERNAME: { required: false }
-      QUAY_ROBOT_TOKEN: { required: false }
   workflow_dispatch:
     inputs:
       version:
@@ -58,6 +55,8 @@ jobs:
   build:
     name: Build and publish ${{ inputs.version }}
     runs-on: ubuntu-latest
+    # Registry credentials come from this environment, which is pinned to p2-ci.
+    environment: publish
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

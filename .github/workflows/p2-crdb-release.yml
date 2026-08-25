@@ -35,11 +35,6 @@ on:
         required: false
         type: boolean
         default: false
-    secrets:
-      QUAY_USERNAME: { required: false }
-      QUAY_ROBOT_TOKEN: { required: false }
-      ANTHROPIC_API_KEY: { required: false }
-      CLAUDE_CODE_OAUTH_TOKEN: { required: false }
   workflow_dispatch:
     inputs:
       version:
@@ -85,6 +80,10 @@ jobs:
   port:
     name: Port ${{ inputs.version }}
     runs-on: ubuntu-latest
+    # The agent credential lives in this environment and nothing else does, so
+    # this job cannot read the registry credentials even though it runs in the
+    # same workflow. The environment's branch policy also pins it to p2-ci.
+    environment: agent
     timeout-minutes: 90
     outputs:
       base: ${{ steps.port.outputs.base }}
@@ -289,6 +288,8 @@ jobs:
       && !inputs.dry_run
       && inputs.publish
     runs-on: ubuntu-latest
+    # Registry credentials, and only this job can reach them.
+    environment: publish
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
