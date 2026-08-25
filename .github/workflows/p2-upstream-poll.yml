@@ -41,8 +41,14 @@ on:
         type: boolean
         default: false
 
+# Must cover what the called workflows declare, not just what the detect job
+# needs: a called workflow cannot be granted more than its caller has, and
+# p2-crdb-release needs contents:write to push the branch and
+# pull-requests:write to open a review PR. Declaring less here made every call
+# fail at startup, before any job ran.
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 concurrency:
   # One poll at a time. Two concurrent polls would both see the same missing
