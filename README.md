@@ -170,12 +170,28 @@ p2/scripts/test-all.sh     # ~1s; also what p2-selftest.yml runs
 ## Setup
 
 `p2/scripts/setup-repo.sh` reports by default and changes nothing without
-`--apply`. Read its header comment before running it — the ordering is
-deliberate. In short: this fork carries all 21 of upstream's workflows, all
-marked active, and the only reason none has ever run is that Actions is disabled
-at the repository level. Enabling Actions without first moving the default branch
-would start upstream's nightly schedules here, and make any human push to a
-`*_crdb` branch trigger a full Keycloak CI run.
+`--apply`. Read its header comment before running it — the ordering is deliberate
+and it is the opposite of what looks natural.
+
+Actions is a **repository-level** setting; there is no way to enable it for one
+branch. What makes this branch the one that runs is being the *default* branch,
+because `schedule` and `workflow_dispatch` only fire from there. Three things
+have to become true, in this order:
+
+1. **Enable Actions.**
+2. **Disable the 21 upstream workflows** — immediately, in the same run, while
+   `main` is still the default branch. The list GitHub lets you disable is
+   indexed from the default branch, so moving the default first risks
+   de-indexing them and leaving no handle to switch them off. That matters
+   because GitHub reads workflow files for a `push` event from the *pushed
+   branch*, not the default one, and upstream's `ci.yml` triggers on push to
+   every branch except `main` — so a human pushing a `*_crdb` branch by hand
+   would kick off a full Keycloak CI run. (Our own pushes use `GITHUB_TOKEN`,
+   which by design does not trigger workflows.)
+3. **Point the default branch at `p2-ci`.**
+
+The window opened by step 1 is a few seconds and nothing pushes during a setup
+run; the risk in step 2 is permanent, which is why it wins.
 
 Secrets to set (the script reports which are missing but never sets them):
 
@@ -183,6 +199,12 @@ Secrets to set (the script reports which are missing but never sets them):
 |---|---|
 | `QUAY_USERNAME`, `QUAY_ROBOT_TOKEN` | pushing images — same values as `phasetwo-containers` |
 | `ANTHROPIC_API_KEY` *or* `CLAUDE_CODE_OAUTH_TOKEN` | resolving ports that need judgement |
+
+Organization secrets count, and are the pattern here — the Quay credentials
+`phasetwo-containers` pushes with are org-level, so this repo needs no copies of
+its own, only to be granted access. `setup-repo.sh` cannot read org secrets
+without `admin:org` and marks them `?` rather than `MISSING`, so a `?` is not a
+problem to go and fix.
 
 Issues are disabled on this repository, so PRs are the only in-repo notification
 surface. If you want to be pushed at rather than polled, a Slack step is a small
