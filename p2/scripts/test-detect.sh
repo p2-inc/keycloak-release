@@ -146,6 +146,15 @@ run "$BASE_TAGS 26.4.16" "$BASE_CRDB" "$BASE_TAGS" "26.7.2" CRDB_DORMANT_STREAMS
 check "26.4.16 bases on 26.4.12" "26.4.16<-26.4.12" "$(crdb_got)"
 
 echo
+echo "policy: review/ branches never look like published ports"
+# open-review-pr.sh creates review/<version>_crdb, which the '*_crdb' glob in
+# fork_crdb_versions matches. Only TAG_PATTERN keeps it out of the version list;
+# if that ever loosened, an in-review port would read as already published and
+# the poller would skip it, or worse be picked as a base.
+run "$BASE_TAGS 26.7.3" "$BASE_CRDB review/26.7.3 review/26.6.9" "$BASE_TAGS" "26.7.2"
+check "review refs ignored, real base chosen" "26.7.3<-26.7.2" "$(crdb_got)"
+
+echo
 echo "policy: adoption can be switched off"
 run "$BASE_TAGS 26.8.0" "$BASE_CRDB" "$BASE_TAGS" "26.7.2" CRDB_ADOPT_NEW_STREAMS=0
 check "new stream not adopted" "" "$(crdb_got)"
