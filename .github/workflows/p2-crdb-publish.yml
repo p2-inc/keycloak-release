@@ -1,0 +1,166 @@
+name: CRDB publish
+
+# Publish a CRDB branch that already exists: the follow-up to a review PR, or a
+# rebuild of an image whose branch is fine.
+#
+# p2-crdb-release.yml handles the automatic path and publishes for itself. This
+# is the manual one, and it is deliberately separate: it takes an existing ref
+# rather than porting anything, so there is no way for it to quietly redo a
+# merge someone has already reviewed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Keycloak version, e.g. 26.7.3'
+        required: true
+        type: string
+      from_ref:
+        description: 'Branch holding the port (default: <version>_crdb)'
+        required: false
+        type: string
+        default: ''
+      skip_smoke:
+        description: 'Skip the CockroachDB smoke test (not recommended)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: p2-crdb-${{ inputs.version }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  VERSION: ${{ inputs.version }}
+  # Reads and writes of the published branches go to the fork; this workflow
+  # runs somewhere else now. Kept in step with FORK_SLUG in p2/config.sh, which
+  # this overrides for anything the scripts do.
+  FORK_SLUG: p2-inc/keycloak
+
+jobs:
+  publish:
+    name: Publish ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    # Declared for the deployment branch policy, not for credentials: the
+    # registry secrets are repository secrets now. See README "Setup".
+    environment: publish
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the source ref
+        id: ref
+        run: |
+          set -euo pipefail
+          . p2/scripts/lib.sh
+          # shellcheck disable=SC2153  # VERSION comes from the workflow env block
+          assert_version "$VERSION"
+          ref='${{ inputs.from_ref }}'
+          ref=${ref:-${VERSION}_crdb}
+          git ls-remote --exit-code --heads "$FORK_REPO" "refs/heads/$ref" >/dev/null \
+            || die "no branch '$ref' in $FORK_REPO"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          log "publishing from $ref"
+
+      - name: Check out the port
+        id: src
+        run: |
+          set -euo pipefail
+          . p2/scripts/lib.sh
+          git clone --filter=blob:none --no-tags --branch '${{ steps.ref.outputs.ref }}' \
+            --single-branch "$FORK_REPO" src
+          echo "sha=$(git -C src rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git -C src log -1 --oneline
+
+      - name: Build the distribution
+        id: dist
+        uses: ./.github/actions/keycloak-dist
+        with:
+          repo-dir: src
+          version: ${{ env.VERSION }}
+          cache-key: ${{ steps.src.outputs.sha }}
+          allow-release-asset: 'false'
+
+      - name: Assemble the image build context
+        run: |
+          set -euo pipefail
+          mkdir -p ctx
+          cp '${{ steps.dist.outputs.tarball }}' ctx/
+          cp src/quarkus/container/Dockerfile ctx/
+          cp src/quarkus/container/ubi-null.sh ctx/
+          cp src/quarkus/container/cockroachdb-jdbc-driver-*.jar ctx/
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: ctx
+          load: true
+          tags: keycloak-crdb:test
+          build-args: |
+            KEYCLOAK_VERSION=${{ env.VERSION }}
+            KEYCLOAK_DIST=keycloak-${{ env.VERSION }}.tar.gz
+          cache-from: type=gha,scope=crdb-${{ env.VERSION }}
+          cache-to: type=gha,mode=max,scope=crdb-${{ env.VERSION }}
+
+      - name: Smoke test
+        if: inputs.skip_smoke != true
+        run: p2/scripts/smoke-test.sh --image keycloak-crdb:test
+
+      - name: Decide the tag list
+        id: tags
+        run: p2/scripts/image-tags.sh --image crdb --version "$VERSION"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ctx
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            KEYCLOAK_VERSION=${{ env.VERSION }}
+            KEYCLOAK_DIST=keycloak-${{ env.VERSION }}.tar.gz
+          cache-from: type=gha,scope=crdb-${{ env.VERSION }}
+
+      # Only when publishing from somewhere else -- a review branch. Publishing
+      # from <version>_crdb itself has nothing to promote.
+      - name: Promote the branch and clean up the review refs
+        if: steps.ref.outputs.ref != format('{0}_crdb', env.VERSION)
+        env:
+          GH_TOKEN: ${{ secrets.FORK_TOKEN }}
+        run: |
+          set -euo pipefail
+          git -C src remote set-url --push origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ env.FORK_SLUG }}.git"
+          git -C src push origin "HEAD:refs/heads/${VERSION}_crdb"
+          echo "pushed ${VERSION}_crdb"
+          for stale in "review/${VERSION}_crdb" "review/${VERSION}_base"; do
+            git -C src push origin --delete "$stale" 2>/dev/null \
+              && echo "deleted $stale" || echo "$stale already gone"
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published \`$VERSION\` from \`${{ steps.ref.outputs.ref }}\`"
+            echo
+            echo '```'
+            tr ',' '\n' <<< '${{ steps.tags.outputs.tags }}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

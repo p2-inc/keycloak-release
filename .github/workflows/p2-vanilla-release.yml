@@ -1,0 +1,171 @@
+name: Vanilla release
+
+# Build an unpatched Keycloak image for a tag and push it to
+# quay.io/phasetwo/keycloak.
+#
+# Two reasons this exists rather than just using quay.io/keycloak/keycloak:
+#
+#   1. Upstream cuts tags it never publishes an image for -- CVE backports in
+#      particular. Building from the tag catches those.
+#   2. It gives us a base image we control, so the ubi9-micro base can be swapped
+#      for Wolfi (as ../phasetwo-containers already does) without waiting on
+#      upstream. See VANILLA_BASE in p2/config.sh.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Keycloak version, e.g. 26.7.3'
+        required: true
+        type: string
+      # See the note in p2-crdb-release.yml: an input referenced by a job `if:`
+      # must be declared for every trigger the workflow can be invoked through,
+      # or the workflow_call path fails static validation before any job starts.
+      publish:
+        description: 'Push to quay when the smoke test passes'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      # Declared so the poller can pass them. They must be repository secrets,
+      # not `publish` environment secrets: a job that a caller reaches through
+      # `uses:` cannot declare an environment, and an environment secret of the
+      # same name would shadow whatever the caller passed.
+      QUAY_USERNAME:
+        required: true
+      QUAY_ROBOT_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Keycloak version, e.g. 26.7.3'
+        required: true
+        type: string
+      publish:
+        description: 'Push to quay when the smoke test passes'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p2-vanilla-${{ inputs.version }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  build:
+    name: Build and publish ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    # Declared for the deployment branch policy, not for credentials: the
+    # registry secrets are repository secrets now. See README "Setup".
+    environment: publish
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cloned even when the release tarball is available: the tag's own
+      # quarkus/container/Dockerfile and ubi-null.sh are what make this image
+      # "vanilla", and a blobless clone costs ~20s against a build that can take
+      # forty minutes. One code path beats saving twenty seconds.
+      - name: Prepare Keycloak source
+        run: p2/scripts/prepare-source.sh --dir src --version "$VERSION"
+
+      - name: Obtain the distribution
+        id: dist
+        uses: ./.github/actions/keycloak-dist
+        with:
+          repo-dir: src
+          version: ${{ env.VERSION }}
+          cache-key: tag-${{ env.VERSION }}
+          # Upstream's published tarball when it exists -- identical bits to
+          # their own image. Falls back to building the tag from source, which
+          # is the only option for the backport tags this workflow exists for.
+          allow-release-asset: 'true'
+
+      - name: Assemble the image build context
+        id: ctx
+        run: |
+          set -euo pipefail
+          mkdir -p ctx
+          cp '${{ steps.dist.outputs.tarball }}' ctx/
+          case "$(bash -c '. p2/config.sh; echo "$VANILLA_BASE"')" in
+            tag)
+              cp src/quarkus/container/Dockerfile ctx/
+              cp src/quarkus/container/ubi-null.sh ctx/
+              echo "base=tag (ubi9-micro, upstream's Dockerfile)"
+              ;;
+            wolfi)
+              cp p2/docker/wolfi/Dockerfile ctx/
+              echo "base=wolfi"
+              ;;
+            *) echo "::error::VANILLA_BASE must be 'tag' or 'wolfi'"; exit 1 ;;
+          esac
+          ls -la ctx
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: ctx
+          load: true
+          tags: keycloak-vanilla:test
+          build-args: |
+            KEYCLOAK_VERSION=${{ env.VERSION }}
+            KEYCLOAK_DIST=keycloak-${{ env.VERSION }}.tar.gz
+          cache-from: type=gha,scope=vanilla-${{ env.VERSION }}
+          cache-to: type=gha,mode=max,scope=vanilla-${{ env.VERSION }}
+
+      - name: Smoke test
+        env:
+          EXPECT_VERSION: ${{ env.VERSION }}
+        run: p2/scripts/smoke-vanilla.sh --image keycloak-vanilla:test
+
+      - name: Decide the tag list
+        id: tags
+        if: inputs.publish
+        run: p2/scripts/image-tags.sh --image vanilla --version "$VERSION"
+
+      - uses: docker/setup-qemu-action@v3
+        if: inputs.publish
+
+      - uses: docker/login-action@v3
+        if: inputs.publish
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
+
+      - name: Build and push
+        if: inputs.publish
+        uses: docker/build-push-action@v6
+        with:
+          context: ctx
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            KEYCLOAK_VERSION=${{ env.VERSION }}
+            KEYCLOAK_DIST=keycloak-${{ env.VERSION }}.tar.gz
+          cache-from: type=gha,scope=vanilla-${{ env.VERSION }}
+
+      - name: Summary
+        if: inputs.publish
+        run: |
+          {
+            echo "### Published vanilla \`$VERSION\`"
+            echo
+            echo "distribution came from: **${{ steps.dist.outputs.source }}**"
+            echo
+            echo '```'
+            tr ',' '\n' <<< '${{ steps.tags.outputs.tags }}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

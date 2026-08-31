@@ -1,0 +1,174 @@
+name: 'Keycloak distribution'
+description: >-
+  Produce the keycloak-<version>.tar.gz server distribution for a checkout,
+  either by downloading the tag's GitHub release asset or by building it from
+  source, and cache the result.
+
+  Keycloak cuts tags without publishing release assets (CVE backports in
+  particular), and the CRDB branches are patched source that was never published
+  at all, so a build from source is always the fallback and sometimes the only
+  option.
+
+inputs:
+  repo-dir:
+    description: 'Keycloak checkout to build (ignored when the release asset is used)'
+    required: true
+  version:
+    description: 'Keycloak version, e.g. 26.7.3'
+    required: true
+  cache-key:
+    description: >-
+      Extra cache discriminator, normally the source commit sha. A given
+      (version, cache-key) pair must always produce identical output.
+    required: true
+  allow-release-asset:
+    description: >-
+      Try upstream''s published tarball before building. Correct for the vanilla
+      image (identical bits to upstream''s own build); never correct for CRDB,
+      whose source is patched.
+    required: false
+    default: 'false'
+  modules:
+    description: 'Maven -pl list; empty builds the whole reactor'
+    required: false
+    default: 'quarkus/deployment,quarkus/dist'
+
+outputs:
+  tarball:
+    description: 'Absolute path to keycloak-<version>.tar.gz'
+    value: ${{ steps.result.outputs.tarball }}
+  source:
+    description: 'release | build | cache'
+    value: ${{ steps.result.outputs.source }}
+
+runs:
+  using: composite
+  steps:
+    - id: paths
+      shell: bash
+      run: |
+        set -euo pipefail
+        out="${RUNNER_TEMP}/kc-dist"
+        mkdir -p "$out"
+        echo "out=$out" >> "$GITHUB_OUTPUT"
+        echo "tarball=$out/keycloak-${{ inputs.version }}.tar.gz" >> "$GITHUB_OUTPUT"
+
+    # Keyed on (version, sha), so a re-run of the same commit -- a retried image
+    # push, a second smoke test -- skips a half-hour build entirely.
+    - id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.paths.outputs.out }}
+        key: kc-dist-${{ inputs.version }}-${{ inputs.cache-key }}
+
+    - id: release
+      if: steps.cache.outputs.cache-hit != 'true' && inputs.allow-release-asset == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        v='${{ inputs.version }}'
+        url="https://github.com/keycloak/keycloak/releases/download/${v}/keycloak-${v}.tar.gz"
+        # Not every tag has a release. A 404 here is the normal path for the
+        # backport tags this automation exists to catch, so it is not an error.
+        if curl -fsSLI -o /dev/null "$url"; then
+          echo "downloading $url"
+          curl -fsSL --retry 3 --retry-delay 3 -o '${{ steps.paths.outputs.tarball }}' "$url"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "no release asset for $v; will build from source"
+          echo "found=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - id: needbuild
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ '${{ steps.cache.outputs.cache-hit }}' = 'true' ]; then
+          echo "value=false" >> "$GITHUB_OUTPUT"; echo "source=cache" >> "$GITHUB_OUTPUT"
+        elif [ '${{ steps.release.outputs.found }}' = 'true' ]; then
+          echo "value=false" >> "$GITHUB_OUTPUT"; echo "source=release" >> "$GITHUB_OUTPUT"
+        else
+          echo "value=true"  >> "$GITHUB_OUTPUT"; echo "source=build" >> "$GITHUB_OUTPUT"
+        fi
+
+    - if: steps.needbuild.outputs.value == 'true'
+      uses: actions/setup-java@v4
+      with:
+        # Keycloak 26.x builds on 21 and its published jars say
+        # Build-Jdk-Spec: 21. A newer JDK compiles but emits different bytecode.
+        java-version: '21'
+        distribution: 'temurin'
+        cache: ''
+
+    # Separate from the dist cache: dependencies are shared across versions, so
+    # this hits even when the dist cache misses, and turns a cold ~10min
+    # dependency download into a restore.
+    - if: steps.needbuild.outputs.value == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: kc-m2-${{ inputs.version }}-${{ hashFiles(format('{0}/pom.xml', inputs.repo-dir)) }}
+        restore-keys: |
+          kc-m2-${{ inputs.version }}-
+          kc-m2-
+
+    - if: steps.needbuild.outputs.value == 'true'
+      shell: bash
+      working-directory: ${{ inputs.repo-dir }}
+      env:
+        # The js/ modules fetch their own node and pnpm through
+        # frontend-maven-plugin, so no host node is needed -- but the build is
+        # heap-hungry and OOMs at the default.
+        MAVEN_OPTS: -Xmx4g
+      run: |
+        set -euo pipefail
+        echo "::group::mvn install"
+        # A stale kiota cache makes the admin-client codegen fail on a version
+        # change; it is regenerated from openapi on every build anyway.
+        rm -rf js/libs/keycloak-admin-client/.kiota
+        MODULES='${{ inputs.modules }}'
+        ./mvnw -B -ntp clean install -DskipTests \
+          ${MODULES:+-pl "$MODULES" -am}
+        echo "::endgroup::"
+
+        tarball=$(ls quarkus/dist/target/keycloak-*.tar.gz 2>/dev/null | head -1)
+        [ -n "$tarball" ] || { echo "::error::no tarball in quarkus/dist/target"; exit 1; }
+        cp "$tarball" '${{ steps.paths.outputs.tarball }}'
+        echo "built $(basename "$tarball")"
+
+    - id: result
+      shell: bash
+      run: |
+        set -euo pipefail
+        t='${{ steps.paths.outputs.tarball }}'
+        if [ ! -f "$t" ]; then
+          echo "::error::expected $t to exist"
+          ls -la '${{ steps.paths.outputs.out }}' || true
+          exit 1
+        fi
+        # A failed build can leave a stub behind; the real distribution is ~170MB.
+        size=$(wc -c < "$t")
+        if [ "$size" -lt 50000000 ]; then
+          echo "::error::$t is only $size bytes; expected a ~170MB distribution"
+          exit 1
+        fi
+        # Size alone is not enough. An interrupted download leaves a file that is
+        # almost the right size and still a valid prefix -- it passes the check
+        # above and then fails much later, inside `docker build`, as
+        # "unpigz: corrupted -- incomplete deflate data". Verify the archive
+        # instead of its length. (Learned the hard way.)
+        if ! gzip -t "$t" 2>/dev/null; then
+          echo "::error::$t is not a valid gzip archive -- truncated download or bad build"
+          rm -f "$t"   # never leave a corrupt file for the cache to pick up
+          exit 1
+        fi
+        # The cache is keyed on (version, sha), so a bad tarball would otherwise
+        # be served to every later run for that commit.
+        if ! tar -tzf "$t" >/dev/null 2>&1; then
+          echo "::error::$t is not a readable tar archive"
+          rm -f "$t"
+          exit 1
+        fi
+        echo "tarball=$t" >> "$GITHUB_OUTPUT"
+        echo "source=${{ steps.needbuild.outputs.source }}" >> "$GITHUB_OUTPUT"
+        echo "distribution: $(basename "$t") ($((size/1024/1024))MB, via ${{ steps.needbuild.outputs.source }})"

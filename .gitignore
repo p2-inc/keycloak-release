@@ -1,0 +1,15 @@
+# Scratch created by the workflows inside the workspace. None of it belongs on
+# this branch -- src/ in particular is a whole Keycloak checkout.
+/src/
+/ctx/
+/promote/
+/prompt.md
+/.keycloak-build/
+
+# Local tooling
+/.venv/
+/tools/
+
+# Python bytecode
+__pycache__/
+*.pyc

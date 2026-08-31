@@ -1,0 +1,408 @@
+name: CRDB release
+
+# Port the CockroachDB patch onto a Keycloak tag, verify it against a real
+# CockroachDB, and publish the branch and image.
+#
+# The clean path -- cherry-pick applies, no new changelog, build and smoke test
+# green -- publishes on its own. Anything that needed an agent to resolve stops
+# for review instead: it opens a PR whose diff is exactly the CRDB patch.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Keycloak version to port, e.g. 26.7.3'
+        required: true
+        type: string
+      base:
+        description: 'Base version; empty resolves the newest _crdb branch that predates it'
+        required: false
+        type: string
+        default: ''
+      # Declared here as well as under workflow_dispatch, and not because the
+      # poller passes them: an expression referencing an input that a
+      # workflow_call invocation has not declared fails static validation, and
+      # the job `if:` conditions below use both. Omitting them made every call
+      # from p2-upstream-poll.yml a startup_failure while direct dispatch -- the
+      # only path with them declared -- worked fine.
+      publish:
+        description: 'Push the branch and image when everything is green'
+        required: false
+        type: boolean
+        default: true
+      dry_run:
+        description: 'Port, build and smoke test only. Publishes nothing.'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      # Declared so the poller can pass them. They must be repository secrets,
+      # not `publish` environment secrets: a job that a caller reaches through
+      # `uses:` cannot declare an environment, and an environment secret of the
+      # same name would shadow whatever the caller passed.
+      QUAY_USERNAME:
+        required: true
+      QUAY_ROBOT_TOKEN:
+        required: true
+      # Writes to the fork: the staging ref, the promoted branch, the review PR
+      # and the cleanup. GITHUB_TOKEN is scoped to the pipeline repo and has no
+      # rights there at all.
+      FORK_TOKEN:
+        required: true
+      # Same workflow_call limitation as the registry credentials: read from the
+      # `agent` environment it came back empty, and it is only reached when a
+      # port actually conflicts -- so it would have failed silently, months from
+      # now, on the one run that needed it.
+      ANTHROPIC_API_KEY:
+        required: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Keycloak version to port, e.g. 26.7.3'
+        required: true
+        type: string
+      base:
+        description: 'Base version (optional; resolved automatically when empty)'
+        required: false
+        type: string
+        default: ''
+      publish:
+        description: 'Push the branch and image when everything is green'
+        type: boolean
+        default: true
+      dry_run:
+        description: 'Port, build and smoke test only. Publishes nothing.'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  # Never two ports of the same version at once; they would fight over the same
+  # branch and staging ref. Different versions run independently.
+  group: p2-crdb-${{ inputs.version }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  VERSION: ${{ inputs.version }}
+  # Where the ported commit is parked between jobs. Under refs/p2/ rather than
+  # refs/heads/ so it never shows up as a branch, never triggers a workflow, and
+  # cannot be mistaken for something publishable.
+  STAGING_REF: refs/p2/staging/${{ inputs.version }}_crdb
+  # Reads and writes of the published branches go to the fork; this workflow
+  # runs somewhere else now. Kept in step with FORK_SLUG in p2/config.sh, which
+  # this overrides for anything the scripts do.
+  FORK_SLUG: p2-inc/keycloak
+
+jobs:
+  port:
+    name: Port ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    # Declared for the deployment branch policy. The credential itself is a
+    # repository secret, passed in by the caller: an environment secret is
+    # unreadable from a workflow reached through `uses:`.
+    environment: agent
+    timeout-minutes: 90
+    outputs:
+      base: ${{ steps.port.outputs.base }}
+      port_status: ${{ steps.port.outputs.status }}
+      gap_count: ${{ steps.gaps.outputs.gap_count }}
+      review_needed: ${{ steps.decide.outputs.review_needed }}
+      sha: ${{ steps.finalize.outputs.sha }}
+    steps:
+      # The workspace root is this CI branch (p2-ci): workflows, scripts and the
+      # agent brief. The Keycloak source is cloned into src/ separately -- it is
+      # a different repository state entirely (a tag of upstream plus our patch),
+      # and keeping the two apart is what lets the _crdb branches stay free of
+      # any automation files.
+      - uses: actions/checkout@v4
+
+      - name: Prepare Keycloak source
+        run: |
+          p2/scripts/prepare-source.sh --dir src \
+            --version "$VERSION" ${{ inputs.base && format('--base {0}', inputs.base) || '' }}
+
+      - name: Cherry-pick the CRDB patch
+        id: port
+        run: |
+          p2/scripts/port-crdb.sh --repo src --version "$VERSION" \
+            ${{ inputs.base && format('--base {0}', inputs.base) || '' }}
+
+      # Runs even when the cherry-pick was clean: a release can add a changelog
+      # without touching any file the patch owns, which conflicts with nothing
+      # and would otherwise ship a schema missing this release's migrations.
+      - name: Check changelog coverage
+        id: gaps
+        continue-on-error: true
+        run: |
+          p2/scripts/changelog-gaps.py --repo src \
+            --base-ref '${{ steps.port.outputs.base }}' --new-ref "$VERSION" --github-output
+
+      - name: Decide whether an agent is needed
+        id: decide
+        env:
+          PORT_STATUS: ${{ steps.port.outputs.status }}
+          GAP_COUNT: ${{ steps.gaps.outputs.gap_count }}
+        run: |
+          set -euo pipefail
+          need=false
+          [ "$PORT_STATUS" = "conflicts" ] && need=true
+          [ "${GAP_COUNT:-0}" != "0" ] && need=true
+          echo "agent_needed=$need" >> "$GITHUB_OUTPUT"
+          # An agent-assisted port is never auto-published, whatever else passes.
+          echo "review_needed=$need" >> "$GITHUB_OUTPUT"
+          echo "agent needed: $need (port=$PORT_STATUS, gaps=${GAP_COUNT:-0})"
+
+      - name: Build the agent brief
+        id: brief
+        if: steps.decide.outputs.agent_needed == 'true'
+        env:
+          BASE: ${{ steps.port.outputs.base }}
+          CONFLICTS: ${{ steps.port.outputs.conflicts }}
+          GAPS: ${{ steps.gaps.outputs.gaps }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CONFLICTS:-}" ]; then
+            section="The cherry-pick left these files unmerged, with conflict markers in place:"$'\n'
+            for f in $CONFLICTS; do section="$section"$'\n'"- \`$f\`"; done
+          else
+            section="_Nothing to do here — the cherry-pick applied cleanly._"
+          fi
+          export CONFLICT_SECTION="$section"
+          if [ -n "${GAPS:-}" ]; then
+            section="Upstream added these changelogs in $VERSION, and \`master-crdb.xml\` does not account for them:"$'\n'
+            for f in $GAPS; do section="$section"$'\n'"- \`$f\`"; done
+          else
+            section="_Nothing to do here — every upstream changelog is accounted for._"
+          fi
+          export GAP_SECTION="$section"
+
+          python3 - <<'PY' > prompt.md
+          import os, pathlib
+          t = pathlib.Path("p2/prompts/resolve-crdb-port.md").read_text()
+          for k in ("VERSION", "BASE", "CONFLICT_SECTION", "GAP_SECTION"):
+              t = t.replace("$" + k, os.environ[k])
+          print(t, end="")
+          PY
+
+          # Handed to the action as a multi-line step output. The delimiter is
+          # not a string that can occur in the brief.
+          {
+            echo "prompt<<__P2_BRIEF_EOF__"
+            cat prompt.md
+            echo "__P2_BRIEF_EOF__"
+          } >> "$GITHUB_OUTPUT"
+          echo "::group::agent brief"; cat prompt.md; echo "::endgroup::"
+
+      - name: Resolve with Claude
+        if: steps.decide.outputs.agent_needed == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Whichever of the two is configured; the unset one is an empty string.
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: ${{ steps.brief.outputs.prompt }}
+          claude_args: >-
+            --max-turns 150
+            --model claude-opus-5
+            --permission-mode bypassPermissions
+
+      - name: Finalize the port
+        id: finalize
+        run: |
+          p2/scripts/finalize-crdb.sh --repo src --version "$VERSION" \
+            --base '${{ steps.port.outputs.base }}'
+
+      # Parked on the fork so the later jobs can reach it without carrying a git
+      # tree through an artifact. Pushed with GITHUB_TOKEN, which by design does
+      # not trigger workflows -- so this cannot wake upstream's CI.
+      - name: Park the ported commit
+        env:
+          GH_TOKEN: ${{ secrets.FORK_TOKEN }}
+        run: |
+          set -euo pipefail
+          git -C src remote set-url --push origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ env.FORK_SLUG }}.git"
+          git -C src push --force origin "HEAD:${STAGING_REF}"
+          echo "parked $(git -C src rev-parse --short HEAD) at ${STAGING_REF}"
+
+      - name: Build the distribution
+        id: dist
+        uses: ./.github/actions/keycloak-dist
+        with:
+          repo-dir: src
+          version: ${{ env.VERSION }}
+          cache-key: ${{ steps.finalize.outputs.sha }}
+          # Never from a release asset: this source is patched, so upstream's
+          # published tarball is the wrong bits by definition.
+          allow-release-asset: 'false'
+
+      # Everything `docker build` needs, and nothing else. Assembled here so the
+      # image jobs do not need a Keycloak checkout at all.
+      - name: Assemble the image build context
+        run: |
+          set -euo pipefail
+          mkdir -p ctx
+          cp '${{ steps.dist.outputs.tarball }}' ctx/
+          cp src/quarkus/container/Dockerfile ctx/
+          cp src/quarkus/container/ubi-null.sh ctx/
+          cp src/quarkus/container/cockroachdb-jdbc-driver-*.jar ctx/
+          ls -la ctx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crdb-context-${{ env.VERSION }}
+          path: ctx/
+          retention-days: 3
+          compression-level: 0   # the tarball is already gzipped
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "::group::git status"; git -C src status || true; echo "::endgroup::"
+          echo "::group::unmerged"; git -C src diff --name-only --diff-filter=U || true; echo "::endgroup::"
+          echo "::group::diff vs tag"; git -C src diff --stat "$VERSION" || true; echo "::endgroup::"
+
+  verify:
+    name: Smoke test on CockroachDB
+    needs: port
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: crdb-context-${{ env.VERSION }}
+          path: ctx
+
+      - uses: docker/setup-buildx-action@v3
+
+      # amd64 only, loaded into the local daemon: this image is for testing, and
+      # the multi-arch push happens later from the same cache.
+      - name: Build the image for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: ctx
+          load: true
+          tags: keycloak-crdb:test
+          build-args: |
+            KEYCLOAK_VERSION=${{ env.VERSION }}
+            KEYCLOAK_DIST=keycloak-${{ env.VERSION }}.tar.gz
+          cache-from: type=gha,scope=crdb-${{ env.VERSION }}
+          cache-to: type=gha,mode=max,scope=crdb-${{ env.VERSION }}
+
+      # The reason this workflow exists rather than just building: the patch is
+      # mostly Liquibase changelogs and a JDBC dialect, none of which compiling
+      # exercises. See p2/scripts/smoke-test.sh for what is asserted.
+      - name: Smoke test
+        run: p2/scripts/smoke-test.sh --image keycloak-crdb:test
+
+  publish:
+    name: Publish branch and image
+    needs: [port, verify]
+    if: >-
+      needs.port.outputs.review_needed == 'false'
+      && !inputs.dry_run
+      && inputs.publish
+    runs-on: ubuntu-latest
+    # Registry credentials, and only this job can reach them.
+    environment: publish
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: crdb-context-${{ env.VERSION }}
+          path: ctx
+
+      - name: Decide the tag list
+        id: tags
+        run: p2/scripts/image-tags.sh --image crdb --version "$VERSION"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ctx
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            KEYCLOAK_VERSION=${{ env.VERSION }}
+            KEYCLOAK_DIST=keycloak-${{ env.VERSION }}.tar.gz
+          cache-from: type=gha,scope=crdb-${{ env.VERSION }}
+
+      # Last, so a published branch always means a verified, pushed image.
+      # phasetwo-containers resolves <version>_crdb by name, so the branch
+      # appearing is the signal that this release is ready to be consumed.
+      - name: Promote the branch
+        env:
+          GH_TOKEN: ${{ secrets.FORK_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init -q promote && cd promote
+          git remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ env.FORK_SLUG }}.git"
+          git fetch -q --depth 1 origin "${STAGING_REF}"
+          git push origin "FETCH_HEAD:refs/heads/${VERSION}_crdb"
+          echo "pushed ${VERSION}_crdb"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published \`$VERSION\`"
+            echo
+            echo "- branch \`${VERSION}_crdb\` (ported from \`${{ needs.port.outputs.base }}_crdb\`)"
+            echo "- image tags:"
+            echo '```'
+            tr ',' '\n' <<< '${{ steps.tags.outputs.tags }}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  review:
+    name: Open a review PR
+    needs: [port, verify]
+    if: needs.port.outputs.review_needed == 'true' && !inputs.dry_run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Push the branch under review and open a PR
+        env:
+          GH_TOKEN: ${{ secrets.FORK_TOKEN }}
+          BASE: ${{ needs.port.outputs.base }}
+          GAP_COUNT: ${{ needs.port.outputs.gap_count }}
+          PORT_STATUS: ${{ needs.port.outputs.port_status }}
+        run: p2/scripts/open-review-pr.sh --version "$VERSION" --staging-ref "$STAGING_REF"
+
+  cleanup:
+    name: Clean up
+    needs: [port, verify, publish, review]
+    if: always() && needs.port.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete the staging ref
+        env:
+          GH_TOKEN: ${{ secrets.FORK_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The commit itself is reachable from the branch by now (or from the PR
+          # branch); this only removes the parking spot.
+          git init -q c && cd c
+          git remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ env.FORK_SLUG }}.git"
+          git push origin --delete "${STAGING_REF}" 2>/dev/null \
+            || echo "staging ref already gone"
