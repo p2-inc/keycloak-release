@@ -189,7 +189,7 @@ gh api -X PUT repos/p2-inc/keycloak/actions/permissions -F enabled=false
 |---|---|
 | `QUAY_USERNAME`, `QUAY_ROBOT_TOKEN` | pushing images — same values as `phasetwo-containers` |
 | `FORK_TOKEN` | writing to the fork: staging refs, the published branch, review PRs |
-| `ANTHROPIC_API_KEY` | resolving ports that need judgement (optional) |
+| `ANTHROPIC_API_KEY` *or* `CLAUDE_CODE_OAUTH_TOKEN` | resolving ports that need judgement (optional) |
 
 ```bash
 gh secret set QUAY_USERNAME     --repo p2-inc/keycloak-release

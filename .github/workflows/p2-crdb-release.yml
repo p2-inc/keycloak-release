@@ -55,6 +55,11 @@ on:
       # now, on the one run that needed it.
       ANTHROPIC_API_KEY:
         required: false
+      # The documented alternative to the API key. Declaring `secrets:` above
+      # closes the set actionlint (and the runner) will accept, so leaving it
+      # out would silently reduce the either/or below to a single option.
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
   workflow_dispatch:
     inputs:
       version:
