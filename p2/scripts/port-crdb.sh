@@ -154,6 +154,23 @@ else
 fi
 endgroup
 
+group "Fixup: drop upstream workflows from the patch"
+# GITHUB_TOKEN may not create or update files under .github/workflows/, so a
+# tree carrying upstream's CI cannot be pushed by this workflow at all. It only
+# slipped through until now because every ported tag happened to reuse a ci.yml
+# blob the fork already had; 26.7.3 changed ci.yml and the park step was
+# rejected. They are dead weight in a *_crdb branch regardless -- nothing builds
+# from them, and shipping them means a branch push can wake upstream's CI on the
+# fork.
+WORKFLOW_DIR=".github/workflows"
+if [ -n "$(g ls-files -- "$WORKFLOW_DIR")" ]; then
+    g rm -q -r -f --ignore-unmatch -- "$WORKFLOW_DIR"
+    log "removed $WORKFLOW_DIR from the patch"
+else
+    log "$WORKFLOW_DIR already absent"
+fi
+endgroup
+
 group "Fixup: regenerate rolling-upgrades-supported-changes.json"
 RU="model/jpa/src/main/resources/META-INF/rolling-upgrades-supported-changes.json"
 # Regenerated from upstream's file at the tag plus the *-crdb.xml changeSets, so

@@ -76,6 +76,12 @@ group "Re-applying generated fixups"
 # The resolution may have added a jpa-changelog-<v>-crdb.xml, whose changeSets
 # must be recorded or model/jpa's db-compatibility-verifier fails the build.
 "$P2_ROOT/p2/scripts/sync-rolling-upgrades.py" --repo "$REPO" --upstream-ref "$VERSION"
+# Re-dropped here because a resolution can restore them: a tree carrying
+# upstream's .github/workflows/ cannot be pushed with GITHUB_TOKEN at all.
+if [ -n "$(g ls-files -- .github/workflows)" ]; then
+    g rm -q -r -f --ignore-unmatch -- .github/workflows
+    log "removed .github/workflows from the patch"
+fi
 endgroup
 
 group "Committing"
@@ -127,6 +133,13 @@ if g diff --name-only "$VERSION..HEAD" | grep -qE 'openapi\.(ya?ml|json)$'; then
     die "openapi is back in the patch; it is generated and must not be committed"
 fi
 log "no generated openapi in the patch"
+
+# Mirrors the openapi guard: if these came back the push would be rejected with
+# "refusing to allow a GitHub App to create or update workflow".
+if [ -n "$(g ls-tree -r --name-only HEAD -- .github/workflows)" ]; then
+    die "upstream workflows are back in the patch; GITHUB_TOKEN cannot push them"
+fi
+log "no upstream workflows in the patch"
 endgroup
 
 group "Changelog coverage"
