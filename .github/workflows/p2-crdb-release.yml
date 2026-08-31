@@ -35,6 +35,15 @@ on:
         required: false
         type: boolean
         default: false
+    secrets:
+      # Declared so the poller can pass them. They must be repository secrets,
+      # not `publish` environment secrets: a job that a caller reaches through
+      # `uses:` cannot declare an environment, and an environment secret of the
+      # same name would shadow whatever the caller passed.
+      QUAY_USERNAME:
+        required: true
+      QUAY_ROBOT_TOKEN:
+        required: true
   workflow_dispatch:
     inputs:
       version:

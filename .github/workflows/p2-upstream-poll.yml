@@ -96,9 +96,18 @@ jobs:
     with:
       version: ${{ matrix.version }}
       base: ${{ matrix.base }}
-    # No `secrets: inherit`. The callees read their credentials from
-    # environments they declare per job, which is the whole point: nothing is
-    # handed down a call chain where an unrelated workflow could pick it up.
+    # Still not `secrets: inherit` -- only these two cross the boundary, so an
+    # unrelated secret can never be picked up down the call chain. They are
+    # passed explicitly rather than read from the callee's `publish`
+    # environment because environment secrets come back empty over
+    # workflow_call: the 26.7.3 poll did enter that environment (the deployment
+    # record exists, ref=p2-ci) and still called docker/login-action with an
+    # empty username, while the same workflow dispatched directly logged in
+    # fine. Passing them means they must be repository secrets, as a job with
+    # `uses:` cannot declare an environment of its own.
+    secrets:
+      QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+      QUAY_ROBOT_TOKEN: ${{ secrets.QUAY_ROBOT_TOKEN }}
 
   vanilla:
     name: Vanilla ${{ matrix.version }}
@@ -113,3 +122,7 @@ jobs:
     uses: ./.github/workflows/p2-vanilla-release.yml
     with:
       version: ${{ matrix.version }}
+    # See the note on the crdb job above.
+    secrets:
+      QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+      QUAY_ROBOT_TOKEN: ${{ secrets.QUAY_ROBOT_TOKEN }}
