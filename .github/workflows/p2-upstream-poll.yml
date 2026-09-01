@@ -67,8 +67,10 @@ jobs:
     outputs:
       crdb_matrix: ${{ steps.detect.outputs.crdb_matrix }}
       vanilla_matrix: ${{ steps.detect.outputs.vanilla_matrix }}
+      released_matrix: ${{ steps.detect.outputs.released_matrix }}
       crdb_count: ${{ steps.detect.outputs.crdb_count }}
       vanilla_count: ${{ steps.detect.outputs.vanilla_count }}
+      released_count: ${{ steps.detect.outputs.released_count }}
       has_work: ${{ steps.detect.outputs.has_work }}
     steps:
       - uses: actions/checkout@v4
@@ -129,3 +131,54 @@ jobs:
     secrets:
       QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
       QUAY_ROBOT_TOKEN: ${{ secrets.QUAY_ROBOT_TOKEN }}
+
+  # Content is downstream of shipping images, so this depends only on `detect`:
+  # the article gets drafted while the builds are still running, rather than
+  # forty minutes later. A release matters most on the day it lands.
+  #
+  # It also means a failed build does not suppress the article. The release is
+  # real either way, and readers still need the CVE verdict.
+  notify-content:
+    name: Draft the release article
+    needs: detect
+    if: needs.detect.outputs.released_count != '0' && inputs.dry_run != true
+    runs-on: ubuntu-latest
+    steps:
+      # `released_matrix`, not `vanilla_matrix`. Keying this off build work was
+      # wrong: an image already on quay makes vanilla_count 0, which would skip
+      # the article for a release that had genuinely just happened. "Is this a
+      # new release?" and "do we still owe an image for it?" are different
+      # questions, and they diverge on any re-run, backfill, or retry after a
+      # failed dispatch. released_matrix is every in-scope tag, recorded before
+      # the already-published filter.
+      - name: Dispatch to content-marketing
+        env:
+          GH_TOKEN: ${{ secrets.CONTENT_DISPATCH_TOKEN }}
+          MATRIX: ${{ needs.detect.outputs.released_matrix }}
+        run: |
+          set -euo pipefail
+          # One dispatch per version. The receiving workflow serialises on a
+          # concurrency group, so several at once queue rather than race.
+          #
+          # `gh api` is checked on exit status, not output: on a 403 it prints
+          # the error body to stdout, which reads as a successful response.
+          rc=0
+          while read -r version; do
+            [ -n "$version" ] || continue
+            if gh api -X POST /repos/p2-inc/content-marketing/dispatches \
+                 -f event_type=keycloak-release \
+                 -f "client_payload[version]=${version}" >/dev/null; then
+              echo "dispatched ${version}"
+            else
+              echo "::warning::Could not dispatch ${version} to content-marketing." \
+                   "Draft it by hand: gh workflow run keycloak-release-article.yml" \
+                   "-R p2-inc/content-marketing -f version=${version}"
+              rc=1
+            fi
+          done < <(echo "$MATRIX" | python3 -c \
+            'import json,sys; [print(e["version"]) for e in json.load(sys.stdin)["include"]]')
+          exit $rc
+        # Shipping images is the job; drafting an article is not. A dispatch
+        # failure warns and leaves the poll green -- the annotation carries the
+        # manual command, so it is visible rather than silent.
+        continue-on-error: true
