@@ -129,3 +129,49 @@ jobs:
     secrets:
       QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
       QUAY_ROBOT_TOKEN: ${{ secrets.QUAY_ROBOT_TOKEN }}
+
+  # Content is downstream of shipping images, so this depends only on `detect`:
+  # the article gets drafted while the builds are still running, rather than
+  # forty minutes later. A release matters most on the day it lands.
+  #
+  # It also means a failed build does not suppress the article. The release is
+  # real either way, and readers still need the CVE verdict.
+  notify-content:
+    name: Draft the release article
+    needs: detect
+    if: needs.detect.outputs.vanilla_count != '0' && inputs.dry_run != true
+    runs-on: ubuntu-latest
+    steps:
+      # The vanilla matrix, because it is one entry per version. The crdb matrix
+      # carries a `base` and can be skipped independently of what was released.
+      - name: Dispatch to content-marketing
+        env:
+          GH_TOKEN: ${{ secrets.CONTENT_DISPATCH_TOKEN }}
+          MATRIX: ${{ needs.detect.outputs.vanilla_matrix }}
+        run: |
+          set -euo pipefail
+          # One dispatch per version. The receiving workflow serialises on a
+          # concurrency group, so several at once queue rather than race.
+          #
+          # `gh api` is checked on exit status, not output: on a 403 it prints
+          # the error body to stdout, which reads as a successful response.
+          rc=0
+          while read -r version; do
+            [ -n "$version" ] || continue
+            if gh api -X POST /repos/p2-inc/content-marketing/dispatches \
+                 -f event_type=keycloak-release \
+                 -f "client_payload[version]=${version}" >/dev/null; then
+              echo "dispatched ${version}"
+            else
+              echo "::warning::Could not dispatch ${version} to content-marketing." \
+                   "Draft it by hand: gh workflow run keycloak-release-article.yml" \
+                   "-R p2-inc/content-marketing -f version=${version}"
+              rc=1
+            fi
+          done < <(echo "$MATRIX" | python3 -c \
+            'import json,sys; [print(e["version"]) for e in json.load(sys.stdin)["include"]]')
+          exit $rc
+        # Shipping images is the job; drafting an article is not. A dispatch
+        # failure warns and leaves the poll green -- the annotation carries the
+        # manual command, so it is visible rather than silent.
+        continue-on-error: true

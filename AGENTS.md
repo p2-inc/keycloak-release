@@ -115,6 +115,7 @@ Credentials are therefore plain **repository secrets** here:
 | `QUAY_USERNAME`, `QUAY_ROBOT_TOKEN` | the jobs that push images |
 | `FORK_TOKEN` | every write to the fork -- staging refs, the published branch, review PRs |
 | `ANTHROPIC_API_KEY` | the `port` job of `p2-crdb-release`, when a port needs judgement |
+| `CONTENT_DISPATCH_TOKEN` | `notify-content` in `p2-upstream-poll`, to fire the release-article workflow in `p2-inc/content-marketing` |
 
 That is a deliberate reversal of the old rule, and it rests on the move: "any
 workflow here can read them" now means "any workflow we wrote". Do not
