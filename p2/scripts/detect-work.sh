@@ -26,6 +26,12 @@
 #   vanilla_matrix  {"include":[{"version":..}]}
 #   crdb_count / vanilla_count
 #   has_work        true|false
+#   released_matrix {"include":[{"version":..}]}  every in-scope tag this run,
+#   released_count  regardless of whether anything still needs building. "Is
+#                   this a new release?" is a different question from "do we
+#                   still owe an image for it", and consumers that care about
+#                   the release itself -- the content-marketing article -- must
+#                   not be gated on leftover build work.
 #
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -80,6 +86,7 @@ crdb_reason() {
 
 CRDB_ROWS=()
 VANILLA_ROWS=()
+RELEASED_ROWS=()
 SUMMARY=()
 
 group "Deciding"
@@ -87,6 +94,10 @@ while read -r tag; do
     [ -n "$tag" ] || continue
     if [ -n "$ONLY_VERSION" ] && [ "$tag" != "$ONLY_VERSION" ]; then continue; fi
     if in_list "$tag" "$BASELINE"; then continue; fi
+
+    # Recorded before the "already published" checks below: this is the set of
+    # releases in scope, not the set of things left to build.
+    RELEASED_ROWS+=("$(jq -nc --arg v "$tag" '{version:$v}')")
 
     # --- vanilla ---
     if [ "${SKIP_VANILLA:-0}" = "1" ] || [ "$VANILLA_ENABLED" != "1" ]; then
@@ -125,11 +136,14 @@ join_rows() {
 
 CRDB_MATRIX=$(join_rows "${CRDB_ROWS[@]+"${CRDB_ROWS[@]}"}")
 VANILLA_MATRIX=$(join_rows "${VANILLA_ROWS[@]+"${VANILLA_ROWS[@]}"}")
+RELEASED_MATRIX=$(join_rows "${RELEASED_ROWS[@]+"${RELEASED_ROWS[@]}"}")
 
-emit crdb_matrix    "$CRDB_MATRIX"
-emit vanilla_matrix "$VANILLA_MATRIX"
-emit crdb_count     "${#CRDB_ROWS[@]}"
-emit vanilla_count  "${#VANILLA_ROWS[@]}"
+emit crdb_matrix     "$CRDB_MATRIX"
+emit vanilla_matrix  "$VANILLA_MATRIX"
+emit released_matrix "$RELEASED_MATRIX"
+emit crdb_count      "${#CRDB_ROWS[@]}"
+emit vanilla_count   "${#VANILLA_ROWS[@]}"
+emit released_count  "${#RELEASED_ROWS[@]}"
 if [ "${#CRDB_ROWS[@]}" -gt 0 ] || [ "${#VANILLA_ROWS[@]}" -gt 0 ]; then
     emit has_work true
 else

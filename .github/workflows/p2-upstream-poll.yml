@@ -67,8 +67,10 @@ jobs:
     outputs:
       crdb_matrix: ${{ steps.detect.outputs.crdb_matrix }}
       vanilla_matrix: ${{ steps.detect.outputs.vanilla_matrix }}
+      released_matrix: ${{ steps.detect.outputs.released_matrix }}
       crdb_count: ${{ steps.detect.outputs.crdb_count }}
       vanilla_count: ${{ steps.detect.outputs.vanilla_count }}
+      released_count: ${{ steps.detect.outputs.released_count }}
       has_work: ${{ steps.detect.outputs.has_work }}
     steps:
       - uses: actions/checkout@v4
@@ -139,15 +141,20 @@ jobs:
   notify-content:
     name: Draft the release article
     needs: detect
-    if: needs.detect.outputs.vanilla_count != '0' && inputs.dry_run != true
+    if: needs.detect.outputs.released_count != '0' && inputs.dry_run != true
     runs-on: ubuntu-latest
     steps:
-      # The vanilla matrix, because it is one entry per version. The crdb matrix
-      # carries a `base` and can be skipped independently of what was released.
+      # `released_matrix`, not `vanilla_matrix`. Keying this off build work was
+      # wrong: an image already on quay makes vanilla_count 0, which would skip
+      # the article for a release that had genuinely just happened. "Is this a
+      # new release?" and "do we still owe an image for it?" are different
+      # questions, and they diverge on any re-run, backfill, or retry after a
+      # failed dispatch. released_matrix is every in-scope tag, recorded before
+      # the already-published filter.
       - name: Dispatch to content-marketing
         env:
           GH_TOKEN: ${{ secrets.CONTENT_DISPATCH_TOKEN }}
-          MATRIX: ${{ needs.detect.outputs.vanilla_matrix }}
+          MATRIX: ${{ needs.detect.outputs.released_matrix }}
         run: |
           set -euo pipefail
           # One dispatch per version. The receiving workflow serialises on a
