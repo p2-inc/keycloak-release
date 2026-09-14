@@ -49,7 +49,9 @@ run() {
         GITHUB_OUTPUT="$WORK/out" \
         "$@" \
         bash "$WORK/root/p2/scripts/detect-work.sh" 2>"$WORK/log" || {
-            echo "--- script failed ---"; cat "$WORK/log"; return 1; }
+            # A case that is asserting the abort wants the status, not the noise.
+            [ -n "${EXPECT_FAIL:-}" ] || { echo "--- script failed ---"; cat "$WORK/log"; }
+            return 1; }
 }
 
 out() { sed -n "s/^$1=//p" "$WORK/out" | tail -1; }
@@ -158,6 +160,26 @@ echo
 echo "policy: adoption can be switched off"
 run "$BASE_TAGS 26.8.0" "$BASE_CRDB" "$BASE_TAGS" "26.7.2" CRDB_ADOPT_NEW_STREAMS=0
 check "new stream not adopted" "" "$(crdb_got)"
+
+echo
+echo "safety: an unreachable registry is not an empty registry"
+# The poller's whole model is that state is derived by asking quay and the fork.
+# A question that could not be asked has no answer, and must not be recorded as
+# the answer "nothing is there" -- that reading makes every in-scope tag look
+# unbuilt and re-pushes images that already shipped. On 2026-09-14 quay returned
+# 502/504 for the length of a poll and 26.7.3, published on 31 August, was
+# queued for a rebuild over the live tag; the run only stopped because an
+# unrelated registry timed out during the build.
+if EXPECT_FAIL=1 run "$BASE_TAGS 26.7.3" "$BASE_CRDB" "$BASE_TAGS" "26.7.2 26.7.3" \
+        P2_FAKE_QUAY_FAIL=1 >/dev/null 2>&1; then
+    check "quay outage aborts the poll" "aborted" "emitted vanilla=[$(vanilla_got)]"
+else
+    check "quay outage aborts the poll" "aborted" "aborted"
+fi
+# The converse, so the fix above cannot be "fail whenever the list is short":
+# a registry that answers and genuinely holds nothing still means build.
+run "$BASE_TAGS 26.7.3" "$BASE_CRDB" "$BASE_TAGS" ""
+check "reachable-but-empty registry still builds" "26.7.3" "$(vanilla_got)"
 
 echo
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

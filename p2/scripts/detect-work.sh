@@ -52,7 +52,20 @@ BASELINE=$(baseline_tags)
 if [ "${SKIP_VANILLA:-0}" = "1" ]; then
     VANILLA_PUBLISHED=""
 else
-    VANILLA_PUBLISHED=$(quay_tags "$VANILLA_IMAGE" | grep -E "$TAG_PATTERN" || true)
+    # Two unrelated "empty"s used to meet on one line here, and conflating them
+    # re-publishes shipped images. quay_tags dies on an unreachable registry --
+    # deliberately, see its comment -- but that exit happens inside the command
+    # substitution's own subshell, so a `|| true` stretched across the whole
+    # pipeline demoted the outage to "nothing is published", and every in-scope
+    # version then looked unbuilt. On 2026-09-14 quay answered 502/504 for the
+    # length of a poll and 26.7.3, on quay since 31 August, was queued for a
+    # rebuild that would have overwritten it and `latest`; only an unrelated
+    # registry timeout downstream stopped it. Take the fetch's status by itself.
+    # The grep keeps its `|| true`, where an exit of 1 really does mean "no tag
+    # matched TAG_PATTERN" and nothing worse.
+    VANILLA_TAGS=$(quay_tags "$VANILLA_IMAGE") \
+        || die "cannot determine what is already published on $VANILLA_IMAGE"
+    VANILLA_PUBLISHED=$(printf '%s\n' "$VANILLA_TAGS" | grep -E "$TAG_PATTERN" || true)
 fi
 [ "$FORCE" = "1" ] && VANILLA_PUBLISHED=""
 [ "$FORCE" = "1" ] && FORCED_BRANCHES="" || FORCED_BRANCHES="$CRDB_BRANCHES"
