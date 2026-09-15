@@ -89,24 +89,42 @@ version_lt() {
 
 # Release tags in the upstream repository, one per line, version-sorted.
 upstream_tags() {
+    local raw
     if [ -n "${P2_FAKE_UPSTREAM_TAGS:-}" ]; then
-        grep -E "$TAG_PATTERN" "$P2_FAKE_UPSTREAM_TAGS" | sort -V; return
+        raw=$(cat "$P2_FAKE_UPSTREAM_TAGS")
+    else
+        raw=$(git ls-remote --tags --refs "$UPSTREAM_REPO") \
+            || die "cannot list tags in $UPSTREAM_REPO"
     fi
-    git ls-remote --tags --refs "$UPSTREAM_REPO" \
+    # The fetch's status is taken above, on its own. Only the filtering below
+    # may come back empty-handed, and there a `grep` exit of 1 means "no tag
+    # matched", not "the lookup failed" -- see the note on fork_crdb_versions.
+    printf '%s\n' "$raw" \
         | sed 's|.*refs/tags/||' \
         | grep -E "$TAG_PATTERN" \
-        | sort -V
+        | sort -V || true
 }
 
 # Versions that have a <version>_crdb branch in the fork, version-sorted.
+#
+# Unreachable fork is fatal, empty answer is not. Those are different facts and
+# the old shape could not tell them apart: the whole pipeline's status was the
+# caller's only signal, and `grep` returns 1 both when nothing is ported yet and
+# when `git ls-remote` printed nothing because it failed. Callers therefore had
+# to write `|| true`, which swallowed the failure too. Fetch first, check that,
+# then filter.
 fork_crdb_versions() {
+    local raw
     if [ -n "${P2_FAKE_CRDB_VERSIONS:-}" ]; then
-        grep -E "$TAG_PATTERN" "$P2_FAKE_CRDB_VERSIONS" | sort -V; return
+        raw=$(cat "$P2_FAKE_CRDB_VERSIONS")
+    else
+        raw=$(git ls-remote --heads "$FORK_REPO" '*_crdb') \
+            || die "cannot list _crdb branches in $FORK_REPO"
     fi
-    git ls-remote --heads "$FORK_REPO" '*_crdb' \
+    printf '%s\n' "$raw" \
         | sed 's|.*refs/heads/||; s|_crdb$||' \
         | grep -E "$TAG_PATTERN" \
-        | sort -V
+        | sort -V || true
 }
 
 # Active tags in a public quay.io repository, one per line. Paginates because
@@ -117,6 +135,11 @@ quay_tags() {
     local image=$1 repo page=1 body has_more
     repo=${image#quay.io/}
     if [ -n "${P2_FAKE_QUAY_DIR:-}" ]; then
+        # The seam has to be able to fail, or the "outage is not emptiness"
+        # contract above is the one behaviour the suite cannot exercise.
+        if [ -n "${P2_FAKE_QUAY_FAIL:-}" ]; then
+            die "cannot list tags for $image"
+        fi
         cat "$P2_FAKE_QUAY_DIR/${repo//\//_}" 2>/dev/null || true
         return
     fi
@@ -171,7 +194,8 @@ _P2_CRDB_CACHED=0
 _P2_CRDB_LIST=""
 crdb_versions() {
     if [ "$_P2_CRDB_CACHED" = "0" ]; then
-        _P2_CRDB_LIST=$(fork_crdb_versions || true)
+        _P2_CRDB_LIST=$(fork_crdb_versions) \
+            || die "cannot determine which versions are already ported"
         _P2_CRDB_CACHED=1
     fi
     printf '%s\n' "$_P2_CRDB_LIST" | grep . || true
