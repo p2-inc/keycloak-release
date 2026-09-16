@@ -30,8 +30,21 @@
 #   released_count  regardless of whether anything still needs building. "Is
 #                   this a new release?" is a different question from "do we
 #                   still owe an image for it", and consumers that care about
-#                   the release itself -- the content-marketing article -- must
-#                   not be gated on leftover build work.
+#                   the release itself must not be gated on leftover build work.
+#
+#   article_version   the one version worth a blog post, or empty. Upstream
+#                     backports a fix into every live stream at once, so a
+#                     single afternoon can produce 26.4.16, 26.6.7 and 26.7.4.
+#                     Only the last is news; the other two are the same fix
+#                     landing in older streams and are not a reason to publish.
+#                     So this is set only when the newest release upstream has
+#                     is itself in scope this run -- a poll that turns up
+#                     nothing but backports leaves it empty and drafts nothing.
+#   article_backports the in-scope versions that are not article_version,
+#                     comma-separated. Not noise to discard: "also backported
+#                     to 26.4.16 and 26.6.7" is what tells a reader on an older
+#                     stream that the fix reached them, so it travels with the
+#                     post rather than becoming posts of its own.
 #
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -100,6 +113,7 @@ crdb_reason() {
 CRDB_ROWS=()
 VANILLA_ROWS=()
 RELEASED_ROWS=()
+RELEASED_VERSIONS=""
 SUMMARY=()
 
 group "Deciding"
@@ -111,6 +125,7 @@ while read -r tag; do
     # Recorded before the "already published" checks below: this is the set of
     # releases in scope, not the set of things left to build.
     RELEASED_ROWS+=("$(jq -nc --arg v "$tag" '{version:$v}')")
+    RELEASED_VERSIONS="$RELEASED_VERSIONS $tag"
 
     # --- vanilla ---
     if [ "${SKIP_VANILLA:-0}" = "1" ] || [ "$VANILLA_ENABLED" != "1" ]; then
@@ -147,6 +162,35 @@ join_rows() {
     fi
 }
 
+# Which of this run's releases, if any, is worth an article. The comparison is
+# against every tag upstream has, not just the ones in scope: that is what makes
+# a backport a backport. 26.4.16 arriving on its own is not news merely because
+# it is the newest thing this particular poll happened to see.
+ARTICLE_VERSION=""
+ARTICLE_BACKPORTS=""
+NEWEST_UPSTREAM=$(printf '%s\n' "$UPSTREAM" | grep . | version_max || true)
+if [ -n "$NEWEST_UPSTREAM" ] && in_list "$NEWEST_UPSTREAM" "$RELEASED_VERSIONS"; then
+    ARTICLE_VERSION=$NEWEST_UPSTREAM
+    # A backport is the same fix landing in an *older stream*, so the companion
+    # versions are the ones from other streams -- highest per stream, since only
+    # the newest of a stream carries the fix. 26.7.3 is not a backport of 26.7.4
+    # even though both are in scope: it is the previous release of the same
+    # line, it had its own article when it landed, and naming it here would tell
+    # a reader their 26.7 install needs an upgrade it already had.
+    article_stream=$(stream_of "$ARTICLE_VERSION")
+    ARTICLE_BACKPORTS=$(
+        for v in $RELEASED_VERSIONS; do
+            [ "$(stream_of "$v")" = "$article_stream" ] && continue
+            printf '%s\t%s\n' "$(stream_of "$v")" "$v"
+        done | sort -V | awk -F'\t' '{ last[$1] = $2 } END { for (s in last) print last[s] }' \
+             | sort -V | paste -sd, -
+    )
+    log "article: $ARTICLE_VERSION${ARTICLE_BACKPORTS:+ (backports: $ARTICLE_BACKPORTS)}"
+elif [ -n "$RELEASED_VERSIONS" ]; then
+    log "article: none --${RELEASED_VERSIONS} $([ "${RELEASED_VERSIONS# }" = "${RELEASED_VERSIONS# * }" ] \
+        && echo "is a backport" || echo "are backports"), not the newest release"
+fi
+
 CRDB_MATRIX=$(join_rows "${CRDB_ROWS[@]+"${CRDB_ROWS[@]}"}")
 VANILLA_MATRIX=$(join_rows "${VANILLA_ROWS[@]+"${VANILLA_ROWS[@]}"}")
 RELEASED_MATRIX=$(join_rows "${RELEASED_ROWS[@]+"${RELEASED_ROWS[@]}"}")
@@ -157,6 +201,8 @@ emit released_matrix "$RELEASED_MATRIX"
 emit crdb_count      "${#CRDB_ROWS[@]}"
 emit vanilla_count   "${#VANILLA_ROWS[@]}"
 emit released_count  "${#RELEASED_ROWS[@]}"
+emit article_version   "$ARTICLE_VERSION"
+emit article_backports "$ARTICLE_BACKPORTS"
 if [ "${#CRDB_ROWS[@]}" -gt 0 ] || [ "${#VANILLA_ROWS[@]}" -gt 0 ]; then
     emit has_work true
 else
