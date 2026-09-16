@@ -239,8 +239,18 @@ pick_crdb_base() {
 # move the `latest` tag. Backports must never steal `latest` from a newer
 # release -- 26.4.15 landing after 26.7.2 is a routine occurrence.
 is_newest_published() {
-    local version=$1 image=$2 highest
-    highest=$( { quay_tags "$image" | grep -E "$TAG_PATTERN" || true; printf '%s\n' "$version"; } | version_max )
+    local version=$1 image=$2 highest published
+    # The same conflation detect-work.sh had, with a worse blast radius. A
+    # registry that did not answer has not said `latest` is free to move; read
+    # as an empty repository it makes every version trivially "the highest ever
+    # published", so the next build to come along takes `latest` -- and the
+    # builds most likely to be running are backports, which is exactly what this
+    # function exists to stop. A 26.4.16 vanilla build was in flight on
+    # 2026-09-16 while this shape was still live. Ask, and fail if unanswered.
+    published=$(quay_tags "$image") \
+        || die "cannot determine the newest tag on $image"
+    highest=$( { printf '%s\n' "$published" | grep -E "$TAG_PATTERN" || true
+                 printf '%s\n' "$version"; } | version_max )
     [ "$highest" = "$version" ]
 }
 
