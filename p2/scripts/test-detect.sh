@@ -162,6 +162,33 @@ run "$BASE_TAGS 26.8.0" "$BASE_CRDB" "$BASE_TAGS" "26.7.2" CRDB_ADOPT_NEW_STREAM
 check "new stream not adopted" "" "$(crdb_got)"
 
 echo
+echo "article: only the newest release is news"
+# Upstream backports one fix into every live stream at once, so a single poll
+# routinely turns up three tags for one piece of news. Exactly one of them is
+# worth a post; the rest are that fix reaching older streams.
+art() { printf '%s|%s' "$(out article_version)" "$(out article_backports)"; }
+
+run "$BASE_TAGS 26.4.16" "$BASE_CRDB" "$BASE_TAGS" "26.7.2"
+check "a lone backport is not news" "|" "$(art)"
+
+run "$BASE_TAGS 26.4.16 26.6.7 26.7.3" "$BASE_CRDB" "$BASE_TAGS" "26.7.2"
+check "newest is the post, older streams ride along" "26.7.3|26.4.16,26.6.7" "$(art)"
+
+# 26.7.3 is the previous release of the article's own stream, not a backport of
+# it. Naming it would tell a 26.7 reader to take an upgrade they already have.
+run "$BASE_TAGS 26.7.3 26.7.4" "$BASE_CRDB" "$BASE_TAGS" "26.7.2"
+check "same-stream predecessor is not a backport" "26.7.4|" "$(art)"
+
+# Only the newest of a stream carries the fix, so one entry per stream.
+run "$BASE_TAGS 26.6.7 26.6.8 26.7.4" "$BASE_CRDB" "$BASE_TAGS" "26.7.2"
+check "one backport per stream, the highest" "26.7.4|26.6.8" "$(art)"
+
+# A backport newer than the article's version by publication order still is not
+# the newest version, which is the whole point of the rule.
+run "$BASE_TAGS 26.7.4 26.4.16" "$BASE_CRDB" "$BASE_TAGS" "26.7.2"
+check "arrival order does not decide the post" "26.7.4|26.4.16" "$(art)"
+
+echo
 echo "safety: an unreachable registry is not an empty registry"
 # The poller's whole model is that state is derived by asking quay and the fork.
 # A question that could not be asked has no answer, and must not be recorded as
