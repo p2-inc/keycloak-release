@@ -121,6 +121,34 @@ run_case "assert_version rejects a command substitution" "rejected" \
 run_case "assert_version rejects empty" "rejected" \
     '( assert_version "" ) 2>/dev/null && echo accepted || echo rejected'
 
+head_ "latest-tag policy"
+# `latest` is the one tag that can regress a published image for every user who
+# does not pin, and the rule guarding it -- only the highest version ever
+# published may take it -- is a query against the registry. So it has the same
+# two-kinds-of-empty hazard as detect-work.sh, and the fake seam exercises it.
+QDIR=$(mktemp -d)
+printf '26.4.15\n26.6.6\n26.7.3\n26.7.4\nlatest\n' > "$QDIR/phasetwo_keycloak"
+latest_case() {
+    local desc=$1 expect=$2 vers=$3 extra=${4:-}
+    local got
+    got=$(env P2_FAKE_QUAY_DIR="$QDIR" $extra bash -c \
+        '. p2/scripts/lib.sh 2>/dev/null
+         is_newest_published "$1" quay.io/phasetwo/keycloak && echo moves || echo stays' \
+        _ "$vers" 2>/dev/null)
+    # `die` takes the whole shell down, so an abort prints neither verdict.
+    # That is a third outcome and the tests name it, rather than letting it
+    # match "stays" by accident and pass for the wrong reason.
+    [ -n "$got" ] || got=aborted
+    [ "$got" = "$expect" ] && ok "$desc" || bad "$desc (want '$expect', got '$got')"
+}
+latest_case "a backport does not take latest"      "stays" 26.4.16
+latest_case "an older stream does not take latest" "stays" 26.6.8
+latest_case "a genuine newest takes latest"        "moves" 26.8.0
+# The one that matters: an unreachable registry must not read as "nothing is
+# published", which would make any version the highest and hand it `latest`.
+latest_case "a registry outage aborts instead of moving latest" "aborted" 26.4.16 P2_FAKE_QUAY_FAIL=1
+rm -rf "$QDIR"
+
 head_ "scope policy suite"
 if out=$(p2/scripts/test-detect.sh 2>&1); then
     ok "$(printf '%s' "$out" | tail -1)"
