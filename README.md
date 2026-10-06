@@ -274,6 +274,11 @@ Not yet exercised, and worth watching on the first live run:
   client with the newest Kiota release, which now produces code their TypeScript
   rejects. `keycloak-dist` sets `KIOTA_VERSION=v1.31.1`, the version upstream
   pinned in 26.6.4; later tags pin their own, which takes precedence.
+- **Upstream archives its release branches, and old tags still point at them.**
+  `model/infinispan` fetches `proto.lock` files from upstream branches by URL;
+  once `release/X.Y` moves to `archive/release/X.Y` those URLs 404 and the tag
+  stops building. `keycloak-dist` rewrites a dead URL to its archived copy in
+  the build tree; nothing on the published branch changes.
 
 - **Multi-arch builds use QEMU**, matching what the manual process did. The
   `dnf`/`ubi-null.sh` steps are slow under emulation. Splitting into native

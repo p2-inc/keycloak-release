@@ -134,6 +134,25 @@ runs:
         # A stale kiota cache makes the admin-client codegen fail on a version
         # change; it is regenerated from openapi on every build anyway.
         rm -rf js/libs/keycloak-admin-client/.kiota
+        # model/infinispan checks its protobuf schemas against proto.lock files
+        # fetched from upstream's release branches, by URL hard-coded in the pom.
+        # Upstream moves old branches under archive/ (release/26.2 became
+        # archive/release/26.2), after which a tag naming the old path cannot be
+        # built: 26.6.0-26.6.3 name release/26.2, 26.6.4 already says archive/.
+        # Point a dead URL at its archived copy; the check itself still runs.
+        pom=model/infinispan/pom.xml
+        if [ -f "$pom" ]; then
+          for url in $(grep -oE 'https://raw\.githubusercontent\.com/keycloak/keycloak/refs/heads/release/[0-9.]+/[^,<]*proto\.lock' "$pom" | sort -u); do
+            curl -fsS -o /dev/null --retry 3 "$url" 2>/dev/null && continue
+            archived=${url/refs\/heads\/release\//refs/heads/archive/release/}
+            if curl -fsS -o /dev/null --retry 3 "$archived" 2>/dev/null; then
+              echo "proto.lock moved: ${url} -> archive/"
+              sed -i "s#${url}#${archived}#g" "$pom"
+            else
+              echo "::warning::proto.lock unreachable at both ${url} and its archive/ path"
+            fi
+          done
+        fi
         MODULES='${{ inputs.modules }}'
         ./mvnw -B -ntp clean install -DskipTests \
           ${MODULES:+-pl "$MODULES" -am}
