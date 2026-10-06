@@ -55,3 +55,32 @@ services:
     # silently remapped when `compose restart` rebinds ephemeral ports. That
     # remapping cost a debugging session: the script cached the pre-restart port
     # and then polled a dead one until it timed out.
+
+  # Check 5 of smoke-test.sh: the same image with JTA left at its default, on a
+  # database of its own. Keycloak must then run each request in one transaction.
+  # 26.6.0_crdb through 26.8.0_crdb shipped with that default silently resolving
+  # to autocommit, and nothing above could notice: the service above sets
+  # KC_TRANSACTION_JTA_ENABLED=false, which is autocommit by design.
+  keycloak-tx:
+    profiles: ["txcheck"]
+    image: ${KC_IMAGE:?}
+    depends_on:
+      cockroach:
+        condition: service_healthy
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_DB: cockroach
+      KC_DB_USERNAME: root
+      KC_DB_PASSWORD: ''
+      KC_DB_SCHEMA: public
+      KC_DB_URL_DATABASE: txcheck
+      KC_DB_URL_HOST: cockroach
+      KC_DB_URL_PORT: 26257
+      KC_DB_URL_PROPERTIES: '?sslmode=disable&useCockroachMetadata=true'
+      KC_TRANSACTION_XA_ENABLED: 'false'
+      KC_HOSTNAME_STRICT: 'false'
+      KC_HTTP_ENABLED: 'true'
+      KC_HEALTH_ENABLED: 'true'
+      KC_LOG_LEVEL: INFO
+    entrypoint: /opt/keycloak/bin/kc.sh start

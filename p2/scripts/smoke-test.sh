@@ -19,6 +19,10 @@
 #   4. it survives a restart                  -- migrations are idempotent; a
 #                                                changeSet that re-runs and
 #                                                fails breaks every upgrade
+#   5. with JTA at its default, a request     -- the transaction options still
+#      runs in one transaction                   resolve; 26.6.0_crdb..26.8.0_crdb
+#                                                shipped with every statement
+#                                                autocommitted
 #
 # Check 2 is the one that justifies the exercise: a master-crdb.xml that lost its
 # includes in a merge produces a server that boots fine on an empty database and
@@ -49,11 +53,12 @@ PROJECT="p2smoke$$"
 export KC_IMAGE="$IMAGE"
 export CRDB_VERSION="$CRDB_TEST_VERSION"
 
-dc() { docker compose -p "$PROJECT" -f "$COMPOSE" "$@"; }
+dc() { docker compose -p "$PROJECT" -f "$COMPOSE" --profile txcheck "$@"; }
 
 dump_logs() {
     echo "::group::cockroach logs (tail)"; dc logs --tail=40 cockroach 2>&1 || true; echo "::endgroup::"
     echo "::group::keycloak logs"; dc logs --tail=250 keycloak 2>&1 || true; echo "::endgroup::"
+    echo "::group::keycloak-tx logs"; dc logs --tail=100 keycloak-tx 2>&1 || true; echo "::endgroup::"
 }
 
 cleanup() {
@@ -70,7 +75,7 @@ cleanup() {
 trap cleanup EXIT
 
 group "Starting $IMAGE against cockroachdb:$CRDB_TEST_VERSION"
-dc up -d --quiet-pull
+dc up -d --quiet-pull cockroach keycloak
 endgroup
 
 # --- 1. readiness ---------------------------------------------------------
@@ -157,6 +162,46 @@ AFTER=$(sql "SELECT count(*) FROM databasechangelog;" | tr -d ' \r')
 log "restarted cleanly; changeSet count unchanged"
 endgroup
 
+# --- 5. requests run in a transaction when JTA is left on ----------------
+# The service above runs with KC_TRANSACTION_JTA_ENABLED=false, the documented
+# CockroachDB setting, which is autocommit by design. keycloak-tx leaves JTA at
+# its default on a database of its own; there a request's statements must form
+# one explicit transaction. CockroachDB records that per statement fingerprint
+# (implicit_txn), so no log scraping is needed.
+group "Checking that a request runs in one transaction with JTA at its default"
+sql "CREATE DATABASE IF NOT EXISTS txcheck;" >/dev/null
+dc up -d --quiet-pull keycloak-tx
+deadline=$((SECONDS + TIMEOUT))
+ready=0
+while [ $SECONDS -lt $deadline ]; do
+    dc exec -T cockroach curl -fsS -m 5 -o /dev/null "http://keycloak-tx:9000/health/ready" >/dev/null 2>&1 \
+        && { ready=1; break; }
+    sleep 3
+done
+[ "$ready" = "1" ] || die "keycloak-tx (JTA at its default) not ready after ${TIMEOUT}s"
+TX_TOKEN=$(incurl -X POST \
+    "http://keycloak-tx:8080/realms/master/protocol/openid-connect/token" \
+    -d "client_id=admin-cli" -d "username=admin" -d "password=admin" \
+    -d "grant_type=password" 2>/dev/null \
+    | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p') || true
+[ -n "$TX_TOKEN" ] || die "could not obtain an admin token from keycloak-tx"
+CREATED=$(incurl -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $TX_TOKEN" -H "Content-Type: application/json" \
+    -d '{"username":"smoke-tx","enabled":true}' \
+    "http://keycloak-tx:8080/admin/realms/master/users")
+[ "$CREATED" = "201" ] || die "creating a user on keycloak-tx returned HTTP $CREATED"
+IMPLICIT=$(sql "SELECT DISTINCT implicit_txn FROM crdb_internal.node_statement_statistics \
+    WHERE database_name = 'txcheck' AND key ILIKE 'INSERT INTO public.user_entity%';" | tr -d ' \r' | sort -u | tr '\n' ' ')
+log "user_entity inserts on txcheck, implicit_txn: ${IMPLICIT:-none recorded}"
+case "$IMPLICIT" in
+    'false '|'f ') ;;
+    '') die "no user_entity insert recorded on txcheck; cannot tell whether requests are transactional" ;;
+    *) die "a request's statements were autocommitted with JTA at its default (implicit_txn: $IMPLICIT). \
+The transaction options no longer resolve as intended; check TransactionPropertyMappers." ;;
+esac
+log "a request's statements run in one explicit transaction"
+endgroup
+
 summary "### Smoke test passed"
 summary ""
 summary "| check | result |"
@@ -166,4 +211,5 @@ summary "| CockroachDB | \`$CRDB_TEST_VERSION\` |"
 summary "| changeSets applied | $TOTAL_APPLIED ($CRDB_APPLIED from \`-crdb\` changelogs) |"
 summary "| admin API | $REALMS realm(s) |"
 summary "| restart | clean, migrations idempotent |"
+summary "| JTA at default | one transaction per request |"
 log "smoke test passed"
