@@ -270,6 +270,11 @@ Not yet exercised, and worth watching on the first live run:
 
 ## Known rough edges
 
+- **Tags before 26.6.4 only build with Kiota pinned.** They generate the admin
+  client with the newest Kiota release, which now produces code their TypeScript
+  rejects. `keycloak-dist` sets `KIOTA_VERSION=v1.31.1`, the version upstream
+  pinned in 26.6.4; later tags pin their own, which takes precedence.
+
 - **Multi-arch builds use QEMU**, matching what the manual process did. The
   `dnf`/`ubi-null.sh` steps are slow under emulation. Splitting into native
   `ubuntu-latest` + `ubuntu-24.04-arm` jobs joined with
