@@ -74,7 +74,7 @@ publishes nothing; the PR body carries the command that does.
 ## What gets verified before anything is published
 
 `p2/scripts/smoke-test.sh` brings the built image up against a real CockroachDB
-and checks four things, because the patch is mostly Liquibase changelogs and a
+and checks six things, because the patch is mostly Liquibase changelogs and a
 JDBC dialect and *compiling exercises none of it*:
 
 1. Keycloak reaches `/health/ready` — it booted and migrated.
@@ -85,6 +85,12 @@ JDBC dialect and *compiling exercises none of it*:
 3. An admin token can be minted — the schema is usable.
 4. It survives a restart with an unchanged changeSet count — migrations are
    idempotent, so upgrades work.
+5. With JTA at its default, a request's statements run in one transaction.
+6. With the `stateless` feature, two Keycloak clusters on one database see each
+   other's realm writes. That travels through the `CLUSTER_EVENT` table, whose
+   `EVENT_DATA` column Liquibase creates as `OID` on CockroachDB unless a `-crdb`
+   changeSet replaces it — through 26.8.1_crdb, every admin write under
+   `stateless` returned 500. Skipped for versions without that table (pre-26.7).
 
 ## Layout
 

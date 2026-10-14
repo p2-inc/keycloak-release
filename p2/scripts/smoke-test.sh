@@ -23,6 +23,10 @@
 #      runs in one transaction                   resolve; 26.6.0_crdb..26.8.0_crdb
 #                                                shipped with every statement
 #                                                autocommitted
+#   6. with the stateless feature, a realm   -- cluster events can be written;
+#      write on one cluster invalidates          through 26.8.1_crdb CLUSTER_EVENT
+#      another sharing the database              .EVENT_DATA was OID, so every
+#                                                admin write returned 500
 #
 # Check 2 is the one that justifies the exercise: a master-crdb.xml that lost its
 # includes in a merge produces a server that boots fine on an empty database and
@@ -53,12 +57,14 @@ PROJECT="p2smoke$$"
 export KC_IMAGE="$IMAGE"
 export CRDB_VERSION="$CRDB_TEST_VERSION"
 
-dc() { docker compose -p "$PROJECT" -f "$COMPOSE" --profile txcheck "$@"; }
+dc() { docker compose -p "$PROJECT" -f "$COMPOSE" --profile txcheck --profile stateless "$@"; }
 
 dump_logs() {
     echo "::group::cockroach logs (tail)"; dc logs --tail=40 cockroach 2>&1 || true; echo "::endgroup::"
     echo "::group::keycloak logs"; dc logs --tail=250 keycloak 2>&1 || true; echo "::endgroup::"
     echo "::group::keycloak-tx logs"; dc logs --tail=100 keycloak-tx 2>&1 || true; echo "::endgroup::"
+    echo "::group::keycloak-sl-a logs"; dc logs --tail=150 keycloak-sl-a 2>&1 || true; echo "::endgroup::"
+    echo "::group::keycloak-sl-b logs"; dc logs --tail=100 keycloak-sl-b 2>&1 || true; echo "::endgroup::"
 }
 
 cleanup() {
@@ -202,6 +208,79 @@ esac
 log "a request's statements run in one explicit transaction"
 endgroup
 
+# --- 6. stateless: two clusters on one database ---------------------------
+# The feature arrived in 26.7.0 together with its CLUSTER_EVENT table, so the
+# table's presence in the database migrated above is what decides whether this
+# version has anything to test. Derived, not configured: a 26.6 backport skips.
+group "Checking the stateless feature: two clusters invalidating each other"
+HAS_CLUSTER_EVENT=$(sql "SELECT count(*) FROM information_schema.tables \
+    WHERE table_schema = 'public' AND table_name = 'cluster_event';" | tr -d ' \r')
+if [ "$HAS_CLUSTER_EVENT" != "1" ]; then
+    STATELESS_RESULT="skipped: no \`CLUSTER_EVENT\` table, the feature predates this version"
+    log "no cluster_event table; this version has no stateless feature to test"
+else
+    # Three Keycloak JVMs and a CockroachDB node is more than a runner should be
+    # asked to hold; the earlier checks are done with theirs.
+    dc stop keycloak keycloak-tx >/dev/null 2>&1 || true
+    sql "CREATE DATABASE IF NOT EXISTS stateless;" >/dev/null
+    # One at a time, so the schema is created by a single node rather than two
+    # racing on Liquibase's lock.
+    for svc in keycloak-sl-a keycloak-sl-b; do
+        dc up -d --quiet-pull "$svc"
+        deadline=$((SECONDS + TIMEOUT))
+        ready=0
+        while [ $SECONDS -lt $deadline ]; do
+            dc exec -T cockroach curl -fsS -m 5 -o /dev/null "http://$svc:9000/health/ready" >/dev/null 2>&1 \
+                && { ready=1; break; }
+            sleep 3
+        done
+        [ "$ready" = "1" ] || die "$svc (stateless) not ready after ${TIMEOUT}s"
+    done
+    log "two stateless clusters up: smoke-a and smoke-b"
+
+    EVENT_DATA_TYPE=$(sql "SELECT data_type FROM stateless.information_schema.columns \
+        WHERE table_name = 'cluster_event' AND column_name = 'event_data';" | tr -d ' \r')
+    log "cluster_event.event_data is ${EVENT_DATA_TYPE:-missing}"
+
+    sl_token() {
+        incurl -X POST "http://$1:8080/realms/master/protocol/openid-connect/token" \
+            -d "client_id=admin-cli" -d "username=admin" -d "password=admin" \
+            -d "grant_type=password" 2>/dev/null \
+            | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'
+    }
+    display_name() {
+        incurl -H "Authorization: Bearer $2" "http://$1:8080/admin/realms/master" \
+            | sed -n 's/.*"displayName":"\([^"]*\)".*/\1/p'
+    }
+    TOKEN_A=$(sl_token keycloak-sl-a) || true
+    TOKEN_B=$(sl_token keycloak-sl-b) || true
+    [ -n "$TOKEN_A" ] && [ -n "$TOKEN_B" ] || die "could not obtain admin tokens from both stateless clusters"
+
+    # B reads the realm first, so the value it serves afterwards comes from its
+    # cache unless an event from A evicted it.
+    BEFORE=$(display_name keycloak-sl-b "$TOKEN_B")
+    MARK="smoke-stateless-$$"
+    WRITE=$(incurl -o /dev/null -w '%{http_code}' -X PUT \
+        -H "Authorization: Bearer $TOKEN_A" -H "Content-Type: application/json" \
+        -d "{\"displayName\":\"$MARK\"}" "http://keycloak-sl-a:8080/admin/realms/master")
+    [ "$WRITE" = "204" ] || die "a realm update on a stateless cluster returned HTTP $WRITE \
+(cluster_event.event_data is ${EVENT_DATA_TYPE:-missing}). Cluster events cannot be stored; \
+EVENT_DATA must be BYTES on CockroachDB -- Liquibase creates a BLOB column as OID there."
+    log "realm update on smoke-a: HTTP 204 (displayName was '${BEFORE}')"
+
+    # The poller runs every 100ms by default, so seconds is generous.
+    deadline=$((SECONDS + 30)) seen=0 t0=$SECONDS
+    while [ $SECONDS -lt $deadline ]; do
+        [ "$(display_name keycloak-sl-b "$TOKEN_B")" = "$MARK" ] && { seen=1; break; }
+        sleep 1
+    done
+    [ "$seen" = "1" ] || die "smoke-b still serves the old realm 30s after smoke-a changed it; \
+cross-cluster invalidation through CLUSTER_EVENT is not working"
+    STATELESS_RESULT="two clusters, write on one seen by the other in ~$((SECONDS - t0))s"
+    log "smoke-b served the change after ~$((SECONDS - t0))s"
+fi
+endgroup
+
 summary "### Smoke test passed"
 summary ""
 summary "| check | result |"
@@ -212,4 +291,5 @@ summary "| changeSets applied | $TOTAL_APPLIED ($CRDB_APPLIED from \`-crdb\` cha
 summary "| admin API | $REALMS realm(s) |"
 summary "| restart | clean, migrations idempotent |"
 summary "| JTA at default | one transaction per request |"
+summary "| stateless | $STATELESS_RESULT |"
 log "smoke test passed"
